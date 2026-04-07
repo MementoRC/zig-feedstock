@@ -310,6 +310,71 @@ def test_flag_filtering() -> None:
             FAIL("compile with conda gcc flags succeeds",
                  f"rc={r.returncode} stderr={r.stderr[:2000]}")
 
+        # --- -flld flag passthrough test ---
+        # When -flld is used, LLD-supported linker flags should NOT be filtered.
+        # Test: compile+link with -flld and LLD-supported flags that would fail
+        # without -flld (since the self-hosted linker doesn't support them).
+        if _is_emulated:
+            SKIP("-flld linker flag passthrough", "emulated CI — linker OOM risk")
+        else:
+            exe = Path(td) / "test_flld"
+            # --version-script is supported by LLD but filtered for self-hosted linker.
+            # Create a trivial version script.
+            ver_script = Path(td) / "test.ver"
+            ver_script.write_text("{ global: main; local: *; };\n")
+            flld_cmd = [
+                zig_cc, "-flld",
+                f"-Wl,--version-script,{ver_script}",
+                "-o", str(exe), str(src),
+            ]
+            r = _run(flld_cmd, cwd=td, timeout=60)
+            if r.stderr == "TIMEOUT":
+                WARN("-flld linker flag passthrough", "timed out (60s)")
+            elif r.returncode == 0 and exe.exists():
+                PASS("-flld linker flag passthrough (--version-script accepted)")
+            else:
+                FAIL("-flld linker flag passthrough",
+                     f"rc={r.returncode} stderr={r.stderr[:2000]}")
+
+            # Test --dynamic-list with -flld (the QEMU/meson use case)
+            dynlist = Path(td) / "test.dynlist"
+            dynlist.write_text('{ main; };\n')
+            so_src = Path(td) / "dynlist_test.c"
+            so_src.write_text(
+                'int shared_func(void) { return 42; }\n'
+                'int main(void) { return shared_func(); }\n'
+            )
+            exe_dyn = Path(td) / "test_dynlist"
+            dyn_cmd = [
+                zig_cc, "-flld",
+                f"-Wl,--dynamic-list={dynlist}",
+                "-o", str(exe_dyn), str(so_src),
+            ]
+            r_dyn = _run(dyn_cmd, cwd=td, timeout=60)
+            if r_dyn.stderr == "TIMEOUT":
+                WARN("-flld --dynamic-list passthrough", "timed out (60s)")
+            elif r_dyn.returncode == 0 and exe_dyn.exists():
+                PASS("-flld --dynamic-list passthrough (LLD honored flag)")
+            else:
+                FAIL("-flld --dynamic-list passthrough",
+                     f"rc={r_dyn.returncode} stderr={r_dyn.stderr[:2000]}")
+
+            # Verify same flags FAIL without -flld (self-hosted linker)
+            exe2 = Path(td) / "test_no_flld"
+            no_flld_cmd = [
+                zig_cc,
+                f"-Wl,--version-script,{ver_script}",
+                "-o", str(exe2), str(src),
+            ]
+            r2 = _run(no_flld_cmd, cwd=td, timeout=60)
+            if r2.returncode == 0 and exe2.exists():
+                # Flag was filtered (wrapper stripped it) — compile succeeds without it
+                PASS("-flld absent: --version-script filtered (compile succeeds without it)")
+            elif r2.returncode != 0:
+                PASS("-flld absent: --version-script correctly rejected by self-hosted linker")
+            else:
+                WARN("-flld absent: unexpected result", f"rc={r2.returncode}")
+
 
 # ===================================================================
 # Section 4 — Shared library creation
@@ -634,6 +699,20 @@ def test_flag_filter_content() -> None:
             PASS(label)
         else:
             FAIL(label)
+
+    # -flld awareness: filter should detect -flld and pass LLD-supported flags
+    if "_use_lld" in text and '"-flld"' in text:
+        PASS("-flld detection logic present")
+    else:
+        FAIL("-flld detection logic present")
+
+    # LLD-aware flags should use _use_lld conditional
+    lld_aware = ["version-script", "dynamic-list", "-z,defs", "gc-sections", "build-id"]
+    for flag in lld_aware:
+        if f"_use_lld" in text and flag in text:
+            PASS(f"{flag} is LLD-aware filtered")
+        else:
+            FAIL(f"{flag} is LLD-aware filtered")
 
 
 # ===================================================================

@@ -35,6 +35,21 @@ if [[ "$(uname -s)" == "Linux" ]] && [[ "@ZIG_TARGET@" != "native" ]]; then
     fi
 fi
 
+# --- Detect -flld or auto-promote to LLD ---
+# When -flld is present (explicit) OR when flags unsupported by zig's self-hosted
+# linker are detected, use bundled LLD and pass those flags through.
+_use_lld=0
+for _a in "$@"; do
+    case "$_a" in
+        -flld) _use_lld=1; break ;;
+        -Wl,--version-script|-Wl,--version-script,*) _use_lld=1; break ;;
+        -Wl,--dynamic-list|-Wl,--dynamic-list,*|-Wl,--dynamic-list=*) _use_lld=1; break ;;
+        -Wl,-z,defs|-Wl,-z,nodelete) _use_lld=1; break ;;
+        -Wl,--gc-sections|-Wl,--no-gc-sections) _use_lld=1; break ;;
+        -Wl,--build-id|-Wl,--build-id=*) _use_lld=1; break ;;
+    esac
+done
+
 # --- Flag filtering ---
 args=()
 i=0
@@ -57,16 +72,19 @@ while [[ $i -lt $argc ]]; do
                 esac
             fi
             ;;
+        # --- Linker flags: only filter when using self-hosted linker (not -flld) ---
+        -Wl,--version-script|-Wl,--version-script,*) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,--dynamic-list|-Wl,--dynamic-list,*|-Wl,--dynamic-list=*) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,-z,defs|-Wl,-z,nodelete|-Wl,-z,*) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,-O*) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,--gc-sections|-Wl,--no-gc-sections) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,--build-id|-Wl,--build-id=*) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,--allow-shlib-undefined|-Wl,--no-allow-shlib-undefined) (( _use_lld )) && args+=("$arg") ;;
+        -Wl,-Bsymbolic-functions|-Wl,-Bsymbolic) (( _use_lld )) && args+=("$arg") ;;
+        -Bsymbolic-functions|-Bsymbolic) (( _use_lld )) && args+=("$arg") ;;
+        # --- Always filtered: unsupported by both self-hosted and LLD via zig cc ---
         -Wl,-rpath-link|-Wl,-rpath-link,*|-Wl,--disable-new-dtags) ;;
-        -Wl,--allow-shlib-undefined|-Wl,--no-allow-shlib-undefined) ;;
-        -Wl,-Bsymbolic-functions|-Wl,-Bsymbolic) ;;
         -Wl,--color-diagnostics) ;;
-        -Wl,--version-script|-Wl,--version-script,*) ;;
-        -Wl,--dynamic-list|-Wl,--dynamic-list,*|-Wl,--dynamic-list=*) ;;
-        -Wl,-z,defs|-Wl,-z,nodelete|-Wl,-z,*) ;;
-        -Wl,-O*) ;;
-        -Wl,--gc-sections|-Wl,--no-gc-sections) ;;
-        -Wl,--build-id|-Wl,--build-id=*) ;;
         -Wl,-exported_symbols_list|-Wl,-exported_symbols_list,*) ;;
         -Wl,-force_symbols_not_weak_list|-Wl,-force_symbols_not_weak_list,*) ;;
         -Wl,-force_symbols_weak_list|-Wl,-force_symbols_weak_list,*) ;;
@@ -74,7 +92,6 @@ while [[ $i -lt $argc ]]; do
         -Wl,-unexported_symbols_list|-Wl,-unexported_symbols_list,*) ;;
         -Wl,-all_load|-Wl,-force_load,*) ;;
         -all_load|-force_load) ;;
-        -Bsymbolic-functions|-Bsymbolic) ;;
         -march=*|-mtune=*|-mcpu=*|-ftree-vectorize) ;;
         -fstack-protector-strong|-fstack-protector|-fno-plt) ;;
         -fdebug-prefix-map=*) ;;
@@ -106,4 +123,15 @@ if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]] && [[ "${_zig_target}" == *-macos* ]
     _zig_target="${_zig_target%%-macos*}-macos.${MACOSX_DEPLOYMENT_TARGET}-${_zig_target##*macos*-}"
 fi
 
-_exec_args=("${_mode}" -target "${_zig_target}" -mcpu=baseline "${_sysroot_flags[@]}" "${_final_args[@]}")
+# --- Auto-inject -flld when unsupported flags triggered LLD promotion ---
+# Skip injection if user already passed -flld explicitly (avoid duplicate)
+_lld_flag=()
+if (( _use_lld )); then
+    _has_explicit_flld=0
+    for _a in "${_final_args[@]}"; do
+        [[ "$_a" == "-flld" ]] && _has_explicit_flld=1 && break
+    done
+    (( _has_explicit_flld )) || _lld_flag=(-flld)
+fi
+
+_exec_args=("${_mode}" "${_lld_flag[@]}" -target "${_zig_target}" -mcpu=baseline "${_sysroot_flags[@]}" "${_final_args[@]}")
