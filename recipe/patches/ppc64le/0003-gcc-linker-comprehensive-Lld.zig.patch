@@ -2,7 +2,7 @@ diff --git a/src/link/Lld.zig b/src/link/Lld.zig
 index 18682705..1fe344a7 100644
 --- a/src/link/Lld.zig
 +++ b/src/link/Lld.zig
-@@ -862,6 +862,233 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
+@@ -862,6 +862,389 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
              .{},
          );
      } else {
@@ -19,7 +19,12 @@ index 18682705..1fe344a7 100644
 +        const is_ppc64 = target.cpu.arch == .powerpc64le or target.cpu.arch == .powerpc64;
 +        const use_gcc_linker = is_ppc64 and !comp.skip_linker_dependencies and output_mode != .Obj;
 +
++        std.log.err("=== LLDZIG: is_ppc64={} skip_deps={} output_mode={s} use_gcc={} ===", .{
++            is_ppc64, comp.skip_linker_dependencies, @tagName(output_mode), use_gcc_linker,
++        });
++
 +        if (use_gcc_linker) {
++            std.log.err("=== PPC64LE GCC REDIRECT ACTIVE ===", .{});
 +            var argv = std.array_list.Managed([]const u8).init(gpa);
 +            defer argv.deinit();
 +
@@ -110,8 +115,10 @@ index 18682705..1fe344a7 100644
 +                .hexstring => |hs| try argv.append(try std.fmt.allocPrint(arena, "-Wl,--build-id=0x{x}", .{hs.toSlice()})),
 +            }
 +
-+            // Image base
-+            try argv.append(try std.fmt.allocPrint(arena, "-Wl,--image-base={d}", .{elf.image_base}));
++            // Image base: intentionally omitted for GCC/ld.bfd redirect.
++            // zig's default image_base is x86_64-centric and not aligned to
++            // ppc64le's 64KB pages, causing ld.bfd to warn/fail.  Let ld.bfd
++            // choose the arch-appropriate default.
 +
 +            // GC sections
 +            if (base.gc_sections) {
@@ -223,8 +230,16 @@ index 18682705..1fe344a7 100644
 +            for (base.comp.link_inputs) |link_input| switch (link_input) {
 +                .res => unreachable,
 +                .dso => continue, // Handled separately below
-+                .object, .archive => |obj| {
++                .object => |obj| {
 +                    try argv.append(try obj.path.toString(arena));
++                },
++                .archive => |obj| {
++                    // Honour CMake's --whole-archive: zig's cc driver sets must_link
++                    // on archives that appeared between -Wl,--whole-archive and
++                    // -Wl,--no-whole-archive (fix landed in zig 0.14.0, PR #21973).
++                    if (obj.must_link) try argv.append("-Wl,--whole-archive");
++                    try argv.append(try obj.path.toString(arena));
++                    if (obj.must_link) try argv.append("-Wl,--no-whole-archive");
 +                },
 +                .dso_exact => |dso_exact| {
 +                    const name = dso_exact.name;
@@ -245,19 +260,50 @@ index 18682705..1fe344a7 100644
 +
 +                // libc++ dependency
 +                if (comp.config.link_libcpp) {
-+                    try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
 +                    if (try libcxx_shared.findSharedLibCxxString(comp, arena)) |shared_path| {
-+                        try argv.append("-Wl,--no-as-needed");
-+                        try argv.append(shared_path);
-+                        try argv.append("-Wl,--as-needed");
++                        if (is_dyn_lib) {
++                            // Shared library output: use dynamic -lc++ / -lc++abi.
++                            // Don't inject zig's bundled static archives -- they have
++                            // hidden visibility which conflicts with .so output.
++                            try argv.append("-Wl,--no-as-needed");
++                            try argv.append("-lc++");
++                            try argv.append("-lc++abi");
++                            try argv.append("-Wl,--as-needed");
++                        } else {
++                            // Executable: static libc++abi + shared libc++.so
++                            try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
++                            try argv.append("-Wl,--no-as-needed");
++                            try argv.append(shared_path);
++                            try argv.append("-Wl,--as-needed");
++                        }
 +                    } else {
++                        // No shared libc++ -- use bundled static archives
++                        try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
 +                        try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
 +                    }
 +                }
 +
-+                // libunwind dependency
++                // libunwind dependency — prefer shared from ZIG_SHARED_LIBCXX_DIR
++                // (co-located with libc++.so in zig-llvm/lib/).
++                // Zig's static libunwind.a has hidden visibility which conflicts
++                // with shared libc++.so that depends on libunwind symbols.
 +                if (comp.config.link_libunwind) {
-+                    try argv.append(try comp.libunwind_static_lib.?.full_object_path.toString(arena));
++                    if (try libcxx_shared.findSharedLibCxxString(comp, arena)) |_| {
++                        // Shared libunwind.so is co-located with libc++.so.
++                        // Use -lunwind so ld.bfd resolves it from the same -L path.
++                        try argv.append("-Wl,--no-as-needed");
++                        try argv.append("-Wl,-lunwind");
++                        try argv.append("-Wl,--as-needed");
++                    } else {
++                        try argv.append(try comp.libunwind_static_lib.?.full_object_path.toString(arena));
++                    }
++                    // libunwind uses pthread_rwlock_* and dl* from the sysroot.
++                    // GCC ld.bfd is strict about link order ("DSO missing from
++                    // command line"), so these must appear after libunwind.
++                    try argv.append("-Wl,--no-as-needed");
++                    try argv.append("-Wl,-lpthread");
++                    try argv.append("-Wl,-ldl");
++                    try argv.append("-Wl,--as-needed");
 +                }
 +
 +                // Explicit libc linking — only when using -nostartfiles (build-time)
@@ -315,10 +361,8 @@ index 18682705..1fe344a7 100644
 +                if (csu.crtn) |p| try argv.append(try p.toString(arena));
 +            }
 +
-+            // Execute
-+            if (comp.verbose_link) {
-+                Compilation.dump_argv(argv.items);
-+            }
++            // Execute — always dump for ppc64le diagnosis (TODO: remove)
++            Compilation.dump_argv(argv.items);
 +
 +            // Spawn GCC as a child process with inherited stdio for debugging
 +            var child = std.process.Child.init(argv.items, arena);

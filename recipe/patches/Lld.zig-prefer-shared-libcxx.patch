@@ -92,7 +92,7 @@
  const Allocator = mem.Allocator;
 --- /dev/null
 +++ b/src/link/libcxx_shared.zig
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,78 @@
 +//! Shared libc++ discovery for conda-forge zig packaging.
 +//! Probes for a shared libc++ library, checking (in order):
 +//!   1. ZIG_SHARED_LIBCXX_DIR env var (target-prefix path for cross-builds)
@@ -138,11 +138,13 @@
 +    // to the target prefix's shared libc++ directory (e.g. $PREFIX/lib/zig-llvm/lib).
 +    // This bypasses the arch guard below since the path points to
 +    // target-arch libraries, not build-host libraries.
-+    if (std.posix.getenv("ZIG_SHARED_LIBCXX_DIR")) |dir| {
-+        for (names) |name| {
-+            const probe = try std.fs.path.join(arena, &.{ dir, name });
-+            std.fs.cwd().access(probe, .{}) catch continue;
-+            return probe;
++    if (builtin.os.tag != .windows) {
++        if (std.posix.getenv("ZIG_SHARED_LIBCXX_DIR")) |dir| {
++            for (names) |name| {
++                const probe = try std.fs.path.join(arena, &.{ dir, name });
++                std.fs.cwd().access(probe, .{}) catch continue;
++                return probe;
++            }
 +        }
 +    }
 +

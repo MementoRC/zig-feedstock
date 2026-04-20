@@ -4,14 +4,14 @@
 function fix_sysroot_libc_scripts() {
   local sysroot_base="${1:-${BUILD_PREFIX}}"
 
-  is_debug && echo "Fixing sysroot linker scripts for relative paths..."
+  dbg echo "Fixing sysroot linker scripts for relative paths..."
 
   # Find all sysroot directories
   for sysroot_dir in "${sysroot_base}"/*-conda-linux-gnu/sysroot; do
     [[ -d "${sysroot_dir}" ]] || continue
 
     local arch_name=$(basename $(dirname "${sysroot_dir}"))
-    is_debug && echo "  Processing sysroot: ${arch_name}"
+    dbg echo "  Processing sysroot: ${arch_name}"
 
     # Fix libc.so, libpthread.so, libm.so, etc. in usr/lib and usr/lib64
     for lib_dir in "${sysroot_dir}"/usr/lib "${sysroot_dir}"/usr/lib64; do
@@ -23,7 +23,7 @@ function fix_sysroot_libc_scripts() {
 
         # Check if it's a linker script (contains "GROUP" or "INPUT")
         if grep -q -E "^(GROUP|INPUT)" "${script_file}" 2>/dev/null; then
-          is_debug && echo "    Patching ${script_file}"
+          dbg echo "    Patching ${script_file}"
 
           # Backup original
           cp "${script_file}" "${script_file}.orig"
@@ -38,7 +38,7 @@ function fix_sysroot_libc_scripts() {
             -e "s|( /lib/ld-|( ../../lib/ld-|g" \
             "${script_file}"
 
-          if is_debug; then
+          if [[ "${DEBUG_ZIG_BUILD:-0}" == "1" ]]; then
             echo "      Before: $(cat "${script_file}.orig")"
             echo "      After:  $(cat "${script_file}")"
           fi
@@ -47,6 +47,6 @@ function fix_sysroot_libc_scripts() {
     done
   done
 
-  is_debug && echo "Sysroot linker scripts fixed successfully"
+  dbg echo "Sysroot linker scripts fixed successfully"
   return 0
 }

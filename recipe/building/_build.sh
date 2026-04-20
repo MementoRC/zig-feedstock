@@ -8,8 +8,8 @@ function build_zig_with_zig() {
   local current_dir
   current_dir=$(pwd)
 
-  is_debug && echo "[build_zig_with_zig] zig=${zig} build_dir=${build_dir} install_dir=${install_dir}"
-  is_debug && echo "[build_zig_with_zig] EXTRA_ZIG_ARGS: ${EXTRA_ZIG_ARGS[*]+"${EXTRA_ZIG_ARGS[*]}"}"
+  dbg echo "[build_zig_with_zig] zig=${zig} build_dir=${build_dir} install_dir=${install_dir}"
+  dbg echo "[build_zig_with_zig] EXTRA_ZIG_ARGS: ${EXTRA_ZIG_ARGS[*]+"${EXTRA_ZIG_ARGS[*]}"}"
 
   if [[ -d "${build_dir}" ]]; then
     cd "${build_dir}" || return 1
@@ -17,7 +17,7 @@ function build_zig_with_zig() {
       "${zig}" build \
         --prefix "${install_dir}" \
         ${EXTRA_ZIG_ARGS[@]+"${EXTRA_ZIG_ARGS[@]}"} \
-        -Dversion-string="${PKG_VERSION}" || rc=$?
+        -Dversion-string="${PKG_VERSION}" 2>&1 || rc=$?
     cd "${current_dir}" || return 1
     if [[ ${rc} -ne 0 ]]; then
       echo "[build_zig_with_zig] FAILED (exit code ${rc})" >&2
