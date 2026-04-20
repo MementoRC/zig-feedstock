@@ -833,6 +833,117 @@ def test_libcxx_shared_simulation() -> None:
 
 
 # ===================================================================
+# Test 4: ZIG_SHARED_LIBCXX_DIR env var override
+# ===================================================================
+def test_libcxx_env_override() -> None:
+    """
+    Verify ZIG_SHARED_LIBCXX_DIR env var overrides shared libc++ discovery.
+
+    This validates that cross-built zig binaries will use shared libc++
+    when the env var points to the target prefix's libc++ directory.
+    The code path is architecture-independent, so testing on native
+    validates the mechanism for all cross-built variants (ppc64le, arm64).
+    """
+    print("--- [patch-0008] ZIG_SHARED_LIBCXX_DIR env var override ---")
+
+    if _is_emulated:
+        SKIP("libcxx-env-override", "emulated, skip linking tests")
+        return
+
+    plat = _get_platform_key()
+    if not plat:
+        SKIP("libcxx-env-override", f"unsupported target ({_conda_triplet})")
+        return
+
+    zig = _find_zig_binary()
+    if not zig:
+        SKIP("libcxx-env-override", f"zig binary not found ({_zig_bin_name})")
+        return
+
+    # Check if the zig binary has the env var probe compiled in
+    strings_bin = shutil.which("strings")
+    if strings_bin:
+        r = _run([strings_bin, zig], timeout=10)
+        if r.returncode == 0:
+            if not any("ZIG_SHARED_LIBCXX_DIR" in l for l in r.stdout.splitlines()):
+                SKIP("libcxx-env-override",
+                     "zig binary lacks ZIG_SHARED_LIBCXX_DIR support "
+                     "(bootstrap predates this patch)")
+                return
+            PASS("ZIG_SHARED_LIBCXX_DIR string found in binary")
+
+    # Find or build a shared libc++
+    zig_lib = _find_zig_lib_dir()
+    existing_shared = None
+    names = LIBCXX_NAMES.get(plat, [])
+    if zig_lib:
+        for subdir in PROBE_SUBDIRS:
+            for name in names:
+                probe = (zig_lib / subdir / name)
+                if probe.exists():
+                    existing_shared = probe
+                    break
+            if existing_shared:
+                break
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        env_dir = td_path / "env_libcxx"
+        env_dir.mkdir()
+
+        primary, _, symlink_name = _platform_shared_lib_info()
+        if not primary:
+            SKIP("libcxx-env-override", f"no shared lib name for {plat}")
+            return
+
+        if existing_shared:
+            shutil.copy2(str(existing_shared), str(env_dir / primary))
+            if symlink_name:
+                (env_dir / symlink_name).symlink_to(primary)
+            PASS(f"using existing shared libc++: {existing_shared}")
+        else:
+            # Build shared libc++ from zig's cached libc++.a
+            libcxx_a = _find_libcxx_static(zig, td_path)
+            if not libcxx_a:
+                if zig_lib:
+                    candidates = list(zig_lib.rglob("libc++.a"))
+                    if candidates:
+                        libcxx_a = candidates[0]
+            if not libcxx_a:
+                SKIP("libcxx-env-override",
+                     "could not find libc++.a to build shared lib")
+                return
+
+            shared_build = _build_shared_libcxx(zig, libcxx_a, td_path)
+            if not shared_build:
+                return
+            shutil.copy2(str(shared_build), str(env_dir / primary))
+            if symlink_name:
+                (env_dir / symlink_name).symlink_to(primary)
+            PASS("built shared libc++ for env override test")
+
+        # On cross-built targets (ppc64le, arm64), zig c++ builds the entire
+        # libc++ from source -- too expensive under emulation (OOM kill).
+        # The strings + probe checks above are sufficient; zig-llvm validates
+        # the actual shared linkage on native x86_64.
+        if is_ppc64le or is_arm64:
+            PASS("libcxx-env-override: patch compiled in + shared lib found "
+                 "(compile test deferred to zig-llvm native build)")
+            return
+
+        # Set env var and test that zig uses shared libc++
+        old_env = os.environ.get("ZIG_SHARED_LIBCXX_DIR")
+        try:
+            os.environ["ZIG_SHARED_LIBCXX_DIR"] = str(env_dir)
+            _check_needed_libcxx(zig, "libcxx-env-override")
+        finally:
+            if old_env is not None:
+                os.environ["ZIG_SHARED_LIBCXX_DIR"] = old_env
+            else:
+                os.environ.pop("ZIG_SHARED_LIBCXX_DIR", None)
+
+
+# ===================================================================
 # Main
 # ===================================================================
 def main() -> int:
@@ -850,6 +961,7 @@ def main() -> int:
     test_libcxx_fallback_static()
     test_libcxx_probe_paths()
     test_libcxx_shared_simulation()
+    test_libcxx_env_override()
 
     print()
     n_pass = len(_results["PASS"])

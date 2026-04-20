@@ -93,6 +93,12 @@ EXTRA_ZIG_ARGS=(
 
 # --- Platform Configuration ---
 
+# Tell the prefer-shared-libcxx patch where to find target-arch libc++.so.
+# On cross-builds, zig_lib_dir points to the build host, so the patch's
+# default probe finds wrong-arch libraries. This env var bypasses the
+# arch guard and probes the target prefix directly.
+export ZIG_SHARED_LIBCXX_DIR="${PREFIX}/lib/zig-llvm/lib"
+
 # Patch 0007 adds -Ddoctest-target to build.zig (Linux only)
 is_linux && EXTRA_ZIG_ARGS+=(-Ddoctest-target=${ZIG_TRIPLET})
 # ppc64le cross: skip docgen — qemu-ppc64le doesn't faithfully emulate traps,

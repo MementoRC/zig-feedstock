@@ -246,7 +246,13 @@ index 18682705..1fe344a7 100644
 +                // libc++ dependency
 +                if (comp.config.link_libcpp) {
 +                    try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
-+                    try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
++                    if (try libcxx_shared.findSharedLibCxxString(comp, arena)) |shared_path| {
++                        try argv.append("-Wl,--no-as-needed");
++                        try argv.append(shared_path);
++                        try argv.append("-Wl,--as-needed");
++                    } else {
++                        try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
++                    }
 +                }
 +
 +                // libunwind dependency
