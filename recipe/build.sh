@@ -156,7 +156,7 @@ fi
 if is_linux; then
   source "${RECIPE_DIR}/building/_libc_tuning.sh"
   create_gcc14_glibc28_compat_lib
-  
+
   is_cross && rm "${PREFIX}"/bin/llvm-config && cp "${BUILD_PREFIX}"/bin/llvm-config "${PREFIX}"/bin/llvm-config
 fi
 
@@ -168,6 +168,17 @@ configure_cmake_zigcpp "${cmake_build_dir}" "${cmake_install_dir}"
 is_linux && is_cross && perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;-lzstd;-lxml2;-lz\"@" "${cmake_build_dir}"/config.h
 is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PREFIX}@" "${cmake_build_dir}"/config.h
 is_osx &&               perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;${PREFIX}/lib/libc++.dylib\"@" "${cmake_build_dir}"/config.h
+
+# zig2.c (the pre-generated C bootstrap from 0.16) calls getrandom,
+# copy_file_range, and statx — all absent from conda-forge's glibc 2.17
+# sysroot. Compile weak-symbol syscall() stubs and inject the .o into
+# both the zig-build path (via config.h's ZIG_LLVM_LIBRARIES) and the
+# CMake fallback path (via cmake/0002 target_link_libraries).
+if is_linux; then
+  source "${RECIPE_DIR}/building/_glibc217_syscall_stubs.sh"
+  create_glibc217_syscall_stubs "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
+  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/glibc217_syscall_stubs.o\"|g" "${cmake_build_dir}/config.h"
+fi
 
 is_debug && echo "=== DEBUG ===" && cat "${cmake_build_dir}"/config.h && echo "=== DEBUG ==="
 

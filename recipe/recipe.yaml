@@ -127,7 +127,16 @@ source:
           - patches/linux/link.zig-01-ldscript-relpath-and-l-flags.patch
           - patches/linux/link.zig-02-default-allow-so-scripts.patch
           - patches/linux/link.zig-03-ldscript-sysroot-remap.patch
-      - if: linux and (x86_64 or ppc64le)
+      # NB: ppc64le patches are gated on cross_target_platform_ (not the
+      # build platform) so they only run when actually targeting
+      # linux-ppc64le. The previous `linux and (x86_64 or ppc64le)` gate
+      # applied them to every linux-64-cross build and a single broken
+      # hunk in the unrebased ppc64le stack killed linux-64, linux-aarch64
+      # and linux-riscv64 before their own patches ran.
+      # TODO(0.16): these patches are not yet rebased against 0.16.0 —
+      # linux-ppc64le will fail patch application until someone picks
+      # this up (see conda-forge/zig-feedstock#102 for regenerated ones).
+      - if: cross_target_platform_ == "linux-ppc64le"
         then:
           # Phase 0001: Architecture Support (add PowerPC64LE to CPU arch switches)
           - patches/ppc64le/0001-arch-support-relocation.zig.patch
@@ -147,12 +156,17 @@ source:
           - patches/ppc64le/0003-linker-redirect-link.zig.patch
           - patches/ppc64le/0003-ldscript-output-format.patch
           - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
-      - if: not unix
-        then:
-          - patches/non_unix/build.zig-maxrss-search-prefix.patch
-          - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
-          - patches/non_unix/Lld.zig-remove-ucrt.patch
-          - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
+      # TODO(0.16): non_unix patches are not yet rebased for 0.16.0.
+      # The first one (build.zig-maxrss-search-prefix.patch) already fails
+      # to apply (context-shift in build.zig); comment them out for now so
+      # Windows CI at least reaches the build step. See
+      # conda-forge/zig-feedstock#102 for a regenerated set.
+      # - if: not unix
+      #   then:
+      #     - patches/non_unix/build.zig-maxrss-search-prefix.patch
+      #     - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
+      #     - patches/non_unix/Lld.zig-remove-ucrt.patch
+      #     - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
     target_directory: zig-source
   # Bootstrap zig binary from upstream (ziglang.org) for osx-arm64.
   # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
@@ -184,6 +198,11 @@ outputs:
           - if: not unix
             then: "*/VERSION.dll"
       script:
+        # Explicit file: a `script: { env: {...} }` block without `file:` or
+        # `content:` is treated as an empty inline script by rattler-build
+        # 0.63+ (earlier versions fell back to recipe/build.sh). CI is on
+        # the newer version, so be explicit to avoid "build.sh never ran".
+        file: build.sh
         env:
           BUILD_NUMBER: ${{ build_number }}
           CONDA_TRIPLET: ${{ conda_triplet }}
