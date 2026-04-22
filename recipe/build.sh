@@ -53,6 +53,21 @@ fi
 
 # --- Main ---
 
+# On osx-arm64 we ship an upstream pre-built zig as the bootstrap (conda-forge
+# zig_impl 0.15.2 pins libcxx 20 and conflicts with the LLVM-21 toolchain
+# required by 0.16). Symlink the extracted binary into a dir on PATH under
+# the name CONDA_ZIG_BUILD expects.
+if is_osx && [[ -d "${SRC_DIR}/zig-bootstrap" ]]; then
+  _bootstrap_root="$(find "${SRC_DIR}/zig-bootstrap" -maxdepth 1 -type d -name 'zig-*' -print -quit)"
+  if [[ -n "${_bootstrap_root}" && -x "${_bootstrap_root}/zig" ]]; then
+    _bootstrap_bin_dir="${SRC_DIR}/zig-bootstrap-bin"
+    mkdir -p "${_bootstrap_bin_dir}"
+    ln -sf "${_bootstrap_root}/zig" "${_bootstrap_bin_dir}/${CONDA_ZIG_BUILD}"
+    export PATH="${_bootstrap_bin_dir}:${PATH}"
+    echo "=== Using upstream zig bootstrap: ${_bootstrap_root}/zig ==="
+  fi
+fi
+
 # Bootstrap zig runs on the build machine — always use CONDA_ZIG_BUILD
 BUILD_ZIG="${CONDA_ZIG_BUILD}"
 
@@ -63,7 +78,13 @@ export ZIG_LOCAL_CACHE_DIR="${SRC_DIR}/zig-local-cache"
 
 cmake_source_dir="${SRC_DIR}/zig-source"
 cmake_build_dir="${SRC_DIR}/build-release"
-cmake_install_dir="${SRC_DIR}/cmake-built-install"
+# Point the cmake install prefix directly at ${PREFIX}. Zig's upstream
+# cmake/install.cmake bakes the configure-time CMAKE_INSTALL_PREFIX into
+# the install script (it invokes `zig build --prefix ${CMAKE_INSTALL_PREFIX}`
+# via install(CODE ...)), so `cmake --install . --prefix X` at install time
+# is silently ignored. Using ${PREFIX} here ensures the CMake fallback path
+# lands files where the rest of build.sh expects them.
+cmake_install_dir="${PREFIX}"
 zig_build_dir="${SRC_DIR}/conda-zig-source"
 
 mkdir -p "${zig_build_dir}" && cp -r "${cmake_source_dir}"/* "${zig_build_dir}"
@@ -174,9 +195,11 @@ if is_linux && [[ "${BUILD_NATIVE_ZIG:-0}" == "1" ]]; then
 fi
 
 
-is_debug && echo "=== Building with ZIG ==="
+is_debug && echo "=== Building with ZIG ===" || true
 if build_zig_with_zig "${zig_build_dir}" "${BUILD_ZIG}" "${PREFIX}"; then
-  is_debug && echo "SUCCESS: zig build completed successfully"
+  # NB: `|| true` — in non-debug is_debug returns 1 and that becomes the
+  # branch's last-executed exit status, which trips `set -e` in build.sh.
+  is_debug && echo "SUCCESS: zig build completed successfully" || true
 elif [[ "${CMAKE_FALLBACK:-1}" == "1" ]]; then
   source "${RECIPE_DIR}/building/_cmake.sh"  # cmake_fallback_build
   cmake_fallback_build "${cmake_source_dir}" "${cmake_build_dir}" "${PREFIX}"

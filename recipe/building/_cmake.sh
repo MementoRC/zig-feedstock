@@ -53,7 +53,7 @@ function apply_cmake_patches() {
     done
   popd > /dev/null
 
-  is_debug && echo "All cmake patches applied successfully"
+  is_debug && echo "All cmake patches applied successfully" || true
   return 0
 }
 
@@ -102,7 +102,10 @@ function cmake_fallback_build() {
   apply_cmake_patches "${source_dir}"
 
   if cmake_build_install "${build_dir}" "${install_prefix}"; then
-    is_debug && echo "SUCCESS: cmake fallback build completed successfully"
+    # NB: trailing `|| true` — in non-debug `is_debug` returns 1, which would
+    # otherwise become the function's exit status and trip `set -e` in the
+    # caller. Force a 0 return on the success path.
+    is_debug && echo "SUCCESS: cmake fallback build completed successfully" || true
   else
     echo "ERROR: Both zig build and cmake build failed" >&2
     exit 1

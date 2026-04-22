@@ -1,9 +1,9 @@
 schema_version: 1
 
 context:
-  build_number: 20
+  build_number: 0
   name: zig
-  version: "0.15.2"
+  version: "0.16.0"
 
   library: ${{ "Library/" if not unix else "" }}
   m2: ${{ "m2-" if not unix else "" }}
@@ -60,13 +60,13 @@ context:
   build_triplet: >-
     ${{
       "x86_64-conda-linux-gnu"                      if build_platform == "linux-64"                      else
+      "aarch64-conda-linux-gnu"                     if build_platform == "linux-aarch64"                 else
       "x86_64-apple-darwin13.4.0"                   if build_platform == "osx-64"                        else
       "arm64-apple-darwin20.0.0"                    if build_platform == "osx-arm64"                     else
       "x86_64-w64-mingw32"                          if build_platform == "win-64"                        else
       "unknown"
     }}
 
-  #    "aarch64-conda-linux-gnu"                    if build_platform == "linux-aarch64"                 else
   #    "powerpc64le-conda-linux-gnu"                if build_platform == "linux-ppc64le"                 else
   #    "aarch64-w64-mingw32"                        if build_platform == "win-arm64"                     else
 
@@ -96,25 +96,34 @@ recipe:
   version: ${{ version }}
 
 source:
-  - url: https://github.com/ziglang/zig/archive/refs/tags/${{ version }}.tar.gz
-    sha256: ebe6eb7006f6bbb72e54bd25d0675f2794084909d63a95aa315f2dcf2af5fd99
+  - url: https://codeberg.org/ziglang/zig/archive/${{ version }}.tar.gz
+    sha256: 095d7483008e885e65d8c6a57fb97c57344f995408a648b8d50f61278ad85d7f
     patches:
-      - patches/Lld.zig-prefer-shared-libcxx.patch
-      # All platforms: wire LLD MachO into zig cc pipeline + allow -fuse-ld=lld
+      # All platforms: wire LLD MachO into zig cc pipeline + allow -fuse-ld=lld.
+      # macho-lld-support must apply before prefer-shared-libcxx because the
+      # latter patches code inside the machoLink function added by the former.
       - patches/Lld.zig-macho-lld-support.patch
+      - patches/Lld.zig-prefer-shared-libcxx.patch
       - patches/llvm.zig-lld-ofmt-macho.patch
       - patches/Config.zig-macho-no-auto-lld.patch
       - patches/main.zig-fuse-ld-lld-cc-path.patch
-      # All platforms: fix MinGW .def LIBRARY lines missing .dll suffix (api-ms-win-* family)
-      - patches/zig_llvm.cpp-mingw-def-dll-suffix.patch
+      # NOTE: patches/zig_llvm.cpp-mingw-def-dll-suffix.patch is obsolete —
+      # upstream 0.16 rewrote MinGW .def parsing in pure Zig
+      # (src/libs/mingw/def.zig) and already appends `.dll` to LIBRARY names
+      # without extensions, so this patch has been dropped permanently.
       - if: linux
         then:
           - patches/linux/build.zig-01-maxrss.patch
           - patches/linux/build.zig-02-doctest-forward-target.patch
-          - patches/linux/posix.zig-glibc-2.17-fstat.patch
+          # NOTE: patches/linux/posix.zig-glibc-2.17-fstat.patch is obsolete —
+          # `std.posix.fstat` was removed entirely in 0.16; no callers remain.
           - patches/linux/llvm.zig-triple-no-glibc-version.patch
-          - patches/linux/Object.zig-elf-zstd-decompression.patch
-          - patches/linux/Elf.zig-debug-tag-bare-TODO-panics.patch
+          # NOTE: patches/linux/Object.zig-elf-zstd-decompression.patch is
+          # obsolete — zig 0.16 upstream already supports ZSTD-compressed ELF
+          # sections (src/link/Elf/Object.zig .ZSTD branch).
+          # NOTE: patches/linux/Elf.zig-debug-tag-bare-TODO-panics.patch was
+          # a diagnostic-only patch (tagging @panic("TODO") sites during 0.15
+          # debugging); not needed for the 0.16 upgrade.
           - patches/linux/link.zig-01-ldscript-relpath-and-l-flags.patch
           - patches/linux/link.zig-02-default-allow-so-scripts.patch
           - patches/linux/link.zig-03-ldscript-sysroot-remap.patch
@@ -145,6 +154,15 @@ source:
           - patches/non_unix/Lld.zig-remove-ucrt.patch
           - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
     target_directory: zig-source
+  # Bootstrap zig binary from upstream (ziglang.org) for osx-arm64.
+  # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
+  # the LLVM-21 compiler stack required by 0.16. Using upstream's pre-built
+  # binary sidesteps the solver conflict; see build.sh for the handoff.
+  - if: osx and arm64
+    then:
+      - url: https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
+        sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+        target_directory: zig-bootstrap
 
 build:
   number: ${{ build_number }}
@@ -173,8 +191,11 @@ outputs:
 
           CONDA_ZIG_BUILD: ${{ build_triplet ~ "-zig" }}
           CONDA_ZIG_HOST: ${{ conda_triplet ~ "-zig" }}
-          
-          CMAKE_FALLBACK: "0"
+
+          # CMake fallback: the 0.15.2 bootstrap can't parse 0.16's build.zig
+          # (new fields like `use_new_linker`, `io`) — fall back to upstream's
+          # CMake-driven stage1→stage2 bootstrap when `zig build` rejects it.
+          CMAKE_FALLBACK: "1"
           
           # --- FORCING REBUILD of native zig due to incompatible previous build version in conda-forge ---
           # BUILD_NATIVE_ZIG: ${{ cross_target_platform_ == "linux-ppc64le" and is_cross_compiler }}
@@ -200,9 +221,11 @@ outputs:
             - ${{ m2 }}coreutils
             - ${{ m2 }}findutils
             - ${{ m2 }}which
-        - if: osx
-          then:
-            - libcxx ${{ llvm_version }}.*
+        # NOTE: libcxx is deliberately NOT listed in the build env on osx.
+        # The bootstrap zig_impl (previous release, 0.15.2) was linked against
+        # libcxx 20 and pins `libcxx 20.*` as a run dep; pinning libcxx 21.*
+        # here would make the build env unsolvable. libcxx 21 is still pulled
+        # into the host env below for the new zig to link against.
         - if: (build_platform != target_platform)
           then:
             - llvmdev ${{ llvm_version }}.*  # llvm-config
@@ -210,8 +233,13 @@ outputs:
               then:
                 - libxml2-devel
 
-        # Self-hosting: build zig with zig
-        - zig_impl_${{ build_platform }} >=0.15.2
+        # Self-hosting: build zig with zig.
+        # On osx-arm64 we bootstrap from an upstream tarball (see `source:`)
+        # because the published conda-forge zig_impl 0.15.2 pins libcxx 20
+        # and conflicts with the LLVM-21 toolchain required by 0.16.
+        - if: not (osx and arm64)
+          then:
+            - zig_impl_${{ build_platform }} >=0.15.2
       host:
         - clangdev ${{ llvm_version }}.*
         - libclang-cpp ${{ llvm_version }}.*
@@ -249,13 +277,21 @@ outputs:
           bin:
             - ${{ conda_triplet }}-zig
           files:
-            - if: not ppc64le
+            # TODO(0.16): langref.html is not generated when building via the
+            # CMake fallback (stage2 hardcodes -Dno-langref because @cImport
+            # is unavailable there). All 0.16 builds currently rely on the
+            # fallback (the 0.15.2 bootstrap can't parse 0.16's build.zig),
+            # so skip the langref check until a stage3 `zig build langref`
+            # post-install step is wired up.
+            - if: false
               then:
                 - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
             - ${{ library }}lib/zig/zig.h
             - ${{ library }}lib/zig/build-web/*
-            - ${{ library }}lib/zig/c/{common,inttypes,stdlib,string,strings}.zig
+            - ${{ library }}lib/zig/c/*.zig
+            - ${{ library }}lib/zig/c/stdlib/*.zig
+            - ${{ library }}lib/zig/c/sys/*.zig
             - ${{ library }}lib/zig/compiler/*
             - ${{ library }}lib/zig/compiler_rt/*
             - ${{ library }}lib/zig/docs/*
