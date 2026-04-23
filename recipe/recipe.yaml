@@ -181,7 +181,7 @@ outputs:
           # BUILD_NATIVE_ZIG: ${{ cross_target_platform_ == "linux-ppc64le" and is_cross_compiler }}
 
           # --- DEBUGGING ---
-          DEBUG_ZIG_BUILD: "1"
+          # DEBUG_ZIG_BUILD: "1"
           # ZIG_USE_CACHE: "0"
     requirements:
       build:
@@ -207,6 +207,9 @@ outputs:
         - if: (build_platform != target_platform)
           then:
             - llvmdev ${{ llvm_version }}.*  # llvm-config
+            - if: linux
+              then:
+                - qemu-execve-${{ "aarch64" if aarch64 else "ppc64le" if ppc64le else "riscv64" if riscv64 else "s390x" if s390x else "unknown" }}
             - if: osx
               then:
                 - libxml2-devel

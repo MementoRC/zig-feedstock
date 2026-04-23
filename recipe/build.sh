@@ -102,9 +102,13 @@ export ZIG_SHARED_LIBCXX_DIR="${PREFIX}/lib/zig-llvm/lib"
 # Patch 0007 adds -Ddoctest-target to build.zig (Linux only)
 is_linux && EXTRA_ZIG_ARGS+=(-Ddoctest-target=${ZIG_TRIPLET})
 
-# ppc64le cross: skip docgen — qemu-ppc64le doesn't faithfully emulate traps,
-# and the ppc64le GCC linker has __tls_get_addr DSO ordering issues with doctests
-[[ "${target_platform}" == "linux-ppc64le" ]] && is_cross && EXTRA_ZIG_ARGS+=(-Dno-langref)
+# ppc64le cross: enable docgen only if qemu is available (needs to run ppc64le doctests)
+if [[ "${target_platform}" == "linux-ppc64le" ]] && is_cross; then
+  _qemu_arch="${ZIG_TRIPLET%%-*}"
+  if ! command -v "qemu-${_qemu_arch}" &>/dev/null; then
+    EXTRA_ZIG_ARGS+=(-Dno-langref)
+  fi
+fi
 
 if is_osx; then
   EXTRA_CMAKE_ARGS+=(
@@ -129,10 +133,10 @@ if is_linux && is_cross; then
     --libc "${zig_build_dir}"/libc_file
     --libc-runtimes "${CONDA_BUILD_SYSROOT}"/lib64
   )
-  # Enable qemu only if zig-qemu package is installed (provides qemu-<arch>
-  # binaries that zig expects). conda's qemu-user-<arch> uses different names.
-  if [[ -d "${PREFIX}/lib/zig-qemu" ]]; then
-    export PATH="${PREFIX}/lib/zig-qemu:${PATH}"
+  # Enable qemu if qemu-execve-<arch> package is installed (conda-forge).
+  # Provides qemu-<arch> in PATH which is what zig's -fqemu expects.
+  _qemu_arch="${ZIG_TRIPLET%%-*}"
+  if command -v "qemu-${_qemu_arch}" &>/dev/null; then
     EXTRA_ZIG_ARGS+=(-fqemu)
   fi
 fi
