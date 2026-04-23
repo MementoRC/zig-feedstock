@@ -32,6 +32,17 @@ dbg() { [[ "${DEBUG_ZIG_BUILD:-0}" == "1" ]] && "$@" || true; }
 [[ -z "${CONDA_ZIG_BUILD:-}" ]] && { echo "CONDA_ZIG_BUILD undefined, use zig_<arch> instead of _impl"; exit 1; }
 [[ -z "${ZIG_TRIPLET:-}" ]] && { echo "ZIG_TRIPLET must be specified in recipe.yaml env"; exit 1; }
 
+# zig 0.15+ requires macOS OS version as major.minor (e.g. "11.0" not bare "11").
+# conda-forge c_stdlib_version may supply a bare major integer.
+if is_osx; then
+  _zig_os_ver="${ZIG_TRIPLET#*-macos.}"   # "11-none" or "10.13-none"
+  _zig_os_ver="${_zig_os_ver%%-*}"         # "11"  or "10.13"
+  if [[ "${_zig_os_ver}" != *.* ]]; then
+    ZIG_TRIPLET="${ZIG_TRIPLET/-macos.${_zig_os_ver}-/-macos.${_zig_os_ver}.0-}"
+    export ZIG_TRIPLET
+  fi
+fi
+
 if [[ "${PKG_NAME:-}" != "zig_impl_"* ]]; then
   echo "ERROR: Unknown package name: ${PKG_NAME} - Verify recipe.yaml script:"
   exit 1

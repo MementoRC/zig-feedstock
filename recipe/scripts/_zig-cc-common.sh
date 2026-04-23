@@ -153,6 +153,18 @@ while [[ $i -lt $argc ]]; do
             fi
             ;;
         # --- Always filtered: unsupported by all linkers or Clang ---
+        # macOS: -isysroot is a compiler flag; ld64.lld needs -syslibroot.
+        # zig's patched MachO lld path may not translate -isysroot → comp.sysroot,
+        # so machoLink never emits -syslibroot and lld can't find libSystem.tbd.
+        # Fix: strip -isysroot and re-emit as -Wl,-syslibroot,-Wl,<path> so the
+        # sysroot goes directly to lld regardless of zig's cc-driver translation.
+        -isysroot)
+            next_i=$((i + 1))
+            if [[ $next_i -lt $argc ]]; then
+                args+=("-Wl,-syslibroot" "-Wl,${argv[$next_i]}")
+                i=$next_i
+            fi
+            ;;
         -Wl,-rpath-link|-Wl,-rpath-link,*|-Wl,--disable-new-dtags) ;;
         -Wl,--color-diagnostics) ;;
         # (macOS Mach-O flags now handled via auto-LLD promotion above)
@@ -251,4 +263,21 @@ for _i in "${!_final_args[@]}"; do
     esac
 done
 
-_exec_args=("${_mode}" "${_lld_flag[@]}" "${_target_flag[@]}" "${_mcpu_flag[@]}" "${_sysroot_flags[@]}" "${_translated_args[@]}")
+# --- WIN-ARM64: inject _fpreset stub to satisfy CRT auto-import relocation ---
+# MinGW crt2.obj references _fpreset via DLL auto-import using
+# IMAGE_REL_ARM64_BRANCH26 which lld-link cannot use for import stubs.
+# Providing a direct definition via the stub bypasses auto-import entirely.
+# Only inject on link steps (no -c flag in args).
+_fpreset_stub=()
+if [[ "@ZIG_TARGET@" == "aarch64-windows-gnu" ]]; then
+    _stub="${CONDA_PREFIX}/lib/zig/libc/mingw/lib-common/_fpreset_arm64.o"
+    _is_compile_only=0
+    for _a in "${_translated_args[@]}"; do
+        [[ "$_a" == "-c" ]] && _is_compile_only=1 && break
+    done
+    if [[ ${_is_compile_only} -eq 0 ]] && [[ -f "${_stub}" ]]; then
+        _fpreset_stub=("${_stub}")
+    fi
+fi
+
+_exec_args=("${_mode}" "${_lld_flag[@]}" "${_target_flag[@]}" "${_mcpu_flag[@]}" "${_sysroot_flags[@]}" "${_translated_args[@]}" "${_fpreset_stub[@]}")
