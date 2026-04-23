@@ -7,7 +7,7 @@ function create_pthread_atfork_stub() {
   local cc_compiler="${2}"
   local output_dir="${3:-${SRC_DIR}}"
 
-  is_debug && echo "Creating pthread_atfork stub for glibc 2.28 ${arch_name}"
+  dbg echo "Creating pthread_atfork stub for glibc 2.28 ${arch_name}"
 
   cat > "${output_dir}/pthread_atfork_stub.c" << 'EOF'
 // Weak stub for pthread_atfork when glibc 2.28 doesn't provide it
@@ -33,7 +33,7 @@ EOF
     return 1
   fi
 
-  is_debug && echo "pthread_atfork stub created: ${output_dir}/pthread_atfork_stub.o"
+  dbg echo "pthread_atfork stub created: ${output_dir}/pthread_atfork_stub.o"
   return 0
 }
 
@@ -49,7 +49,7 @@ function create_libc_single_threaded_stub() {
   local cc_compiler="${2}"
   local output_dir="${3:-${SRC_DIR}}"
 
-  is_debug && echo "Creating __libc_single_threaded stub for ${arch_name}"
+  dbg echo "Creating __libc_single_threaded stub for ${arch_name}"
 
   cat > "${output_dir}/libc_single_threaded_stub.c" << 'EOF'
 // Weak stub for __libc_single_threaded when targeting glibc < 2.32
@@ -69,6 +69,6 @@ EOF
     return 1
   fi
 
-  is_debug && echo "__libc_single_threaded stub created: ${output_dir}/libc_single_threaded_stub.o"
+  dbg echo "__libc_single_threaded stub created: ${output_dir}/libc_single_threaded_stub.o"
   return 0
 }
