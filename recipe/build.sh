@@ -53,18 +53,32 @@ fi
 
 # --- Main ---
 
-# On osx-arm64 we ship an upstream pre-built zig as the bootstrap (conda-forge
-# zig_impl 0.15.2 pins libcxx 20 and conflicts with the LLVM-21 toolchain
-# required by 0.16). Symlink the extracted binary into a dir on PATH under
-# the name CONDA_ZIG_BUILD expects.
-if is_osx && [[ -d "${SRC_DIR}/zig-bootstrap" ]]; then
+# On osx + windows we ship an upstream pre-built zig as the bootstrap.
+# osx: conda-forge zig_impl 0.15.2 pins libcxx 20 and conflicts with
+#      the LLVM-21 toolchain required by 0.16. Use upstream 0.15.2.
+# win: the 0.15.2 bootstrap can't parse 0.16's build.zig → we fall back
+#      to CMake, but MSVC rejects the resulting zig2.c with C2466 on
+#      zero-sized arrays. Use upstream 0.16.0 (parses its own build.zig)
+#      to skip the CMake path entirely.
+# Symlink the extracted binary into a dir on PATH under the name
+# CONDA_ZIG_BUILD expects.
+if { is_osx || is_not_unix; } && [[ -d "${SRC_DIR}/zig-bootstrap" ]]; then
   _bootstrap_root="$(find "${SRC_DIR}/zig-bootstrap" -maxdepth 1 -type d -name 'zig-*' -print -quit)"
-  if [[ -n "${_bootstrap_root}" && -x "${_bootstrap_root}/zig" ]]; then
+  _bootstrap_zig="${_bootstrap_root}/zig"
+  # Upstream ships zig.exe on Windows
+  [[ ! -x "${_bootstrap_zig}" && -x "${_bootstrap_root}/zig.exe" ]] && _bootstrap_zig="${_bootstrap_root}/zig.exe"
+  if [[ -n "${_bootstrap_root}" && -x "${_bootstrap_zig}" ]]; then
     _bootstrap_bin_dir="${SRC_DIR}/zig-bootstrap-bin"
     mkdir -p "${_bootstrap_bin_dir}"
-    ln -sf "${_bootstrap_root}/zig" "${_bootstrap_bin_dir}/${CONDA_ZIG_BUILD}"
+    # On Windows the symlink target needs the .exe suffix
+    if is_not_unix; then
+      _bootstrap_link="${_bootstrap_bin_dir}/${CONDA_ZIG_BUILD}.exe"
+    else
+      _bootstrap_link="${_bootstrap_bin_dir}/${CONDA_ZIG_BUILD}"
+    fi
+    ln -sf "${_bootstrap_zig}" "${_bootstrap_link}"
     export PATH="${_bootstrap_bin_dir}:${PATH}"
-    echo "=== Using upstream zig bootstrap: ${_bootstrap_root}/zig ==="
+    echo "=== Using upstream zig bootstrap: ${_bootstrap_zig} ==="
   fi
 fi
 

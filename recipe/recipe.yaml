@@ -183,6 +183,18 @@ source:
       - url: https://ziglang.org/download/0.15.2/zig-x86_64-macos-0.15.2.tar.xz
         sha256: 375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f
         target_directory: zig-bootstrap
+  # Windows (win-64 / win-arm64 cross both run on win-64 hardware):
+  # use upstream 0.16.0 binary to skip the 0.15.2→cmake fallback path.
+  # MSVC compiling zig2.c (C backend output) fails with C2466 "cannot
+  # allocate an array of constant size 0" on the generated zero-sized
+  # arrays, and there's no /w switch that downgrades it. Bootstrapping
+  # from a zig that can parse 0.16's build.zig keeps us out of CMake
+  # entirely.
+  - if: build_platform == "win-64"
+    then:
+      - url: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
+        sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+        target_directory: zig-bootstrap
 
 build:
   number: ${{ build_number }}
