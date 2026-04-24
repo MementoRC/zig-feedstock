@@ -1,6 +1,6 @@
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -647,26 +647,72 @@ set(ZIG1_C_SOURCE "${PROJECT_BINARY_DIR}/zig1.c")
+@@ -647,26 +647,74 @@ set(ZIG1_C_SOURCE "${PROJECT_BINARY_DIR}/zig1.c")
  set(ZIG2_C_SOURCE "${PROJECT_BINARY_DIR}/zig2.c")
  set(ZIG_COMPILER_RT_C_SOURCE "${PROJECT_BINARY_DIR}/compiler_rt.c")
  
@@ -14,7 +14,11 @@
 +# tools through a build-host compiler via add_custom_command, leaving
 +# every other target on CMAKE_C_COMPILER.
 +if(ZIG_STAGE1_HOST_CC)
-+  set(ZIG_WASM2C_EXE "${PROJECT_BINARY_DIR}/zig-wasm2c")
++  # Use distinct file names so the add_custom_command OUTPUT can't collide
++  # with a phony target of the same name (ninja reports "multiple rules
++  # generate zig-wasm2c" otherwise). Downstream rules depend on the file
++  # path directly; CMake links that to this producer.
++  set(ZIG_WASM2C_EXE "${PROJECT_BINARY_DIR}/zig-wasm2c-host")
 +  set(_wasm2c_src_abs "")
 +  foreach(_src ${ZIG_WASM2C_SOURCES})
 +    list(APPEND _wasm2c_src_abs "${PROJECT_SOURCE_DIR}/${_src}")
@@ -27,7 +31,6 @@
 +    COMMENT "Building zig-wasm2c with host compiler ${ZIG_STAGE1_HOST_CC}"
 +    VERBATIM
 +  )
-+  add_custom_target(zig-wasm2c ALL DEPENDS "${ZIG_WASM2C_EXE}")
 +else()
 +  set(ZIG_WASM2C_EXE zig-wasm2c)
 +  add_executable(zig-wasm2c ${ZIG_WASM2C_SOURCES})
@@ -37,8 +40,9 @@
  add_custom_command(
    OUTPUT "${ZIG1_C_SOURCE}"
 -  COMMAND zig-wasm2c "${ZIG1_WASM_MODULE}" "${ZIG1_C_SOURCE}"
+-  DEPENDS zig-wasm2c "${ZIG1_WASM_MODULE}"
 +  COMMAND "${ZIG_WASM2C_EXE}" "${ZIG1_WASM_MODULE}" "${ZIG1_C_SOURCE}"
-   DEPENDS zig-wasm2c "${ZIG1_WASM_MODULE}"
++  DEPENDS "${ZIG_WASM2C_EXE}" "${ZIG1_WASM_MODULE}"
    COMMENT "Converting ${ZIG1_WASM_MODULE} to ${ZIG1_C_SOURCE}"
    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
  )
@@ -49,7 +53,7 @@
 -if(MSVC)
 -  target_link_options(zig1 PRIVATE /STACK:0x10000000)
 +if(ZIG_STAGE1_HOST_CC)
-+  set(ZIG1_EXE "${PROJECT_BINARY_DIR}/zig1")
++  set(ZIG1_EXE "${PROJECT_BINARY_DIR}/zig1-host")
 +  separate_arguments(_zig1_flags NATIVE_COMMAND "${ZIG1_COMPILE_FLAGS}")
 +  if(MSVC)
 +    set(_zig1_link_flags "/STACK:0x10000000")
@@ -65,7 +69,6 @@
 +    COMMENT "Building zig1 with host compiler ${ZIG_STAGE1_HOST_CC}"
 +    VERBATIM
 +  )
-+  add_custom_target(zig1 ALL DEPENDS "${ZIG1_EXE}")
  else()
 -  target_link_libraries(zig1 LINK_PUBLIC m)
 -  if(MINGW)
@@ -84,21 +87,25 @@
    endif()
  endif()
  
-@@ -685,7 +731,7 @@ set(BUILD_ZIG2_ARGS
+@@ -685,8 +733,8 @@ set(BUILD_ZIG2_ARGS
  
  add_custom_command(
    OUTPUT "${ZIG2_C_SOURCE}"
 -  COMMAND zig1 ${BUILD_ZIG2_ARGS}
+-  DEPENDS zig1 "${ZIG_STAGE2_SOURCES}"
 +  COMMAND "${ZIG1_EXE}" ${BUILD_ZIG2_ARGS}
-   DEPENDS zig1 "${ZIG_STAGE2_SOURCES}"
++  DEPENDS "${ZIG1_EXE}" "${ZIG_STAGE2_SOURCES}"
    COMMENT "Running zig1.wasm to produce ${ZIG2_C_SOURCE}"
    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-@@ -702,7 +748,7 @@ set(BUILD_COMPILER_RT_ARGS
+ )
+@@ -702,8 +750,8 @@ set(BUILD_COMPILER_RT_ARGS
  
  add_custom_command(
    OUTPUT "${ZIG_COMPILER_RT_C_SOURCE}"
 -  COMMAND zig1 ${BUILD_COMPILER_RT_ARGS}
+-  DEPENDS zig1 "${ZIG_STAGE2_SOURCES}"
 +  COMMAND "${ZIG1_EXE}" ${BUILD_COMPILER_RT_ARGS}
-   DEPENDS zig1 "${ZIG_STAGE2_SOURCES}"
++  DEPENDS "${ZIG1_EXE}" "${ZIG_STAGE2_SOURCES}"
    COMMENT "Running zig1.wasm to produce ${ZIG_COMPILER_RT_C_SOURCE}"
    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+ )
