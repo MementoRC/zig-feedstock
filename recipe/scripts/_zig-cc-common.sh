@@ -33,7 +33,7 @@ for _arg in "$@"; do
     if [[ "$_arg" == "-print-search-dirs" ]]; then
         _zig_lib="${CONDA_PREFIX}/lib/zig"
         _mingw_common="${_zig_lib}/libc/mingw/lib-common"
-        _mingw_arch="${_zig_lib}/libc/mingw/lib-x86_64"
+        _mingw_arch="${_zig_lib}/libc/mingw/lib-@ZIG_TARGET_ARCH@"
         echo "install: ${_zig_lib}/"
         echo "programs: =${CONDA_PREFIX}/bin/"
         echo "libraries: =${_mingw_common}:${_mingw_arch}:${_zig_lib}"
@@ -42,13 +42,21 @@ for _arg in "$@"; do
 done
 
 # --- Handle -print-file-name=<name> (GCC/Clang compat) ---
-# zig doesn't support this flag. Intercept it, probe for the file in the
-# same locations as libcxx_shared.zig (zig-llvm/lib then lib), print the
-# path if found (or echo back the name if not), and exit.
+# zig doesn't support this flag. Intercept it and search:
+#   1. zig-llvm/lib and lib/ -- for LLVM/clang runtime libs (libclang_rt.*, libc++.a, ...)
+#   2. MinGW lib-common and arch-specific dirs -- for import libs (libkernel32.a, ...)
+# Print the resolved path if found, or echo back the name if not (GCC behaviour).
 for _arg in "$@"; do
     if [[ "$_arg" == -print-file-name=* ]]; then
         _name="${_arg#-print-file-name=}"
-        for _dir in "${CONDA_PREFIX}/lib/zig-llvm/lib" "${CONDA_PREFIX}/lib"; do
+        _zig_lib="${CONDA_PREFIX}/lib/zig"
+        for _dir in \
+            "${CONDA_PREFIX}/lib/zig-llvm/lib" \
+            "${CONDA_PREFIX}/lib" \
+            "${_zig_lib}/libc/mingw/lib-common" \
+            "${_zig_lib}/libc/mingw/lib-@ZIG_TARGET_ARCH@" \
+            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-common" \
+            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-@ZIG_TARGET_ARCH@"; do
             if [[ -e "${_dir}/${_name}" ]]; then
                 echo "${_dir}/${_name}"
                 exit 0
