@@ -1,20 +1,21 @@
 --- a/build.zig
 +++ b/build.zig
-@@ -213,8 +213,19 @@ pub fn build(b: *std.Build) !void {
+@@ -213,8 +213,20 @@ pub fn build(b: *std.Build) !void {
      exe.use_new_linker = b.option(bool, "new-linker", "Use the new linker");
  
      const use_llvm = b.option(bool, "use-llvm", "Use the llvm backend");
 -    exe.use_llvm = use_llvm;
 -    exe.use_lld = use_llvm;
 +
-+    // PowerPC64LE: Force LLVM backend + enable LLD code path
-+    // With use_lld=true, Zig goes through src/link/Lld.zig::elfLink()
-+    // Patch 0021 intercepts this path and spawns external GCC instead
-+    // GCC handles PowerPC64 ABI properly (.TOC., __tls_get_addr, pthread_atfork)
++    // PowerPC64LE: LLVM backend + system linker (not LLD).
++    // LLD doesn't support PowerPC64 TOC relocations (R_PPC64_* = 31/60/119/
++    // 120), so use_lld=false falls back to the system toolchain (`cc` via
++    // GCC / ld.bfd) for linking. Also applies to the bootstrap zig that
++    // compiles our zig — otherwise its built-in LLD chokes on zigcpp.a.
 +    if (target.result.cpu.arch == .powerpc64le) {
-+        exe.use_llvm = true; // Force LLVM backend for code generation
-+        exe.use_lld = true; // Enable LLD code path (intercepted by patch 0021)
-+        exe.root_module.link_libc = true; // Force libc linking
++        exe.use_llvm = true;
++        exe.use_lld = false;
++        exe.root_module.link_libc = true;
 +    } else {
 +        exe.use_llvm = use_llvm;
 +        exe.use_lld = use_llvm;
@@ -22,7 +23,7 @@
  
      if (no_bin) {
          b.getInstallStep().dependOn(&exe.step);
-@@ -353,6 +364,12 @@ pub fn build(b: *std.Build) !void {
+@@ -353,6 +365,12 @@ pub fn build(b: *std.Build) !void {
              exe.root_module.linkSystemLibrary("uuid", .{});
              exe.root_module.linkSystemLibrary("ole32", .{});
          }
@@ -35,7 +36,7 @@
      }
  
      const semver = try std.SemanticVersion.parse(version);
-@@ -834,6 +851,13 @@ fn addCmakeCfgOptionsToExe(
+@@ -834,6 +852,13 @@ fn addCmakeCfgOptionsToExe(
      mod.addIncludePath(.{ .cwd_relative = cfg.lld_include_dir });
      mod.addIncludePath(.{ .cwd_relative = cfg.llvm_include_dir });
      mod.addLibraryPath(.{ .cwd_relative = cfg.llvm_lib_dir });
