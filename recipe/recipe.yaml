@@ -458,7 +458,7 @@ outputs:
   - package:
       name: zig_${{ cross_target_platform_ }}
     build:
-      skip: not (is_native or is_cross_compiler or is_cross_target)
+      skip: not (is_native or is_cross_compiler or is_cross_target) or (is_native and cross_target_platform_ == "linux-ppc64le")
       script:
         file: install_zig_activation.py
         env:
@@ -582,7 +582,7 @@ outputs:
   - package:
       name: zig
     build:
-      skip: cross_target_platform_ != target_platform
+      skip: cross_target_platform_ != target_platform or (is_native and cross_target_platform_ == "linux-ppc64le")
       script:
         file: install_zig_symlinks.py
         env:
@@ -618,7 +618,7 @@ outputs:
       name: zig-compiler
     build:
       noarch: generic
-      skip: cross_target_platform_ != target_platform
+      skip: cross_target_platform_ != target_platform or (is_native and cross_target_platform_ == "linux-ppc64le")
       script: echo "zig-compiler metapackage"
     requirements:
       run:
