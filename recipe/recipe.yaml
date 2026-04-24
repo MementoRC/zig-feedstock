@@ -133,9 +133,10 @@ source:
       # applied them to every linux-64-cross build and a single broken
       # hunk in the unrebased ppc64le stack killed linux-64, linux-aarch64
       # and linux-riscv64 before their own patches ran.
-      # TODO(0.16): these patches are not yet rebased against 0.16.0 —
-      # linux-ppc64le will fail patch application until someone picks
-      # this up (see conda-forge/zig-feedstock#102 for regenerated ones).
+      # NOTE: 0001-arch-support-st-other-{Object,SharedObject}.zig.patch
+      # were obsolete in 0.16 — upstream replaced the raw cast with
+      # `@truncate(@as(u3, ...))` which already masks the arch-specific
+      # high bits of st_other.
       - if: cross_target_platform_ == "linux-ppc64le"
         then:
           # Phase 0001: Architecture Support (add PowerPC64LE to CPU arch switches)
@@ -148,13 +149,12 @@ source:
           - patches/ppc64le/0001-arch-support-synthetic_sections.zig.patch
           - patches/ppc64le/0001-arch-support-eh_frame.zig.patch
           - patches/ppc64le/0001-arch-support-Thunk.zig.patch
-          - patches/ppc64le/0001-arch-support-st-other-Object.zig.patch
-          - patches/ppc64le/0001-arch-support-st-other-SharedObject.zig.patch
           # Phase 0002: Build Configuration (LLVM backend, library paths)
           - patches/ppc64le/0002-build-config-build.zig.patch
           # Phase 0003: Linker Redirection (comprehensive GCC linker with full flag translation)
+          # NOTE: 0003-ldscript-output-format.patch dropped — it duplicates the
+          # `elf64-powerpcle` entry already added by 0001-arch-support-LdScript.zig.patch.
           - patches/ppc64le/0003-linker-redirect-link.zig.patch
-          - patches/ppc64le/0003-ldscript-output-format.patch
           - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
       - if: not unix
         then:

@@ -1,7 +1,7 @@
 --- a/build.zig
 +++ b/build.zig
-@@ -204,8 +204,20 @@
-     exe.entitlements = entitlements;
+@@ -213,8 +213,19 @@ pub fn build(b: *std.Build) !void {
+     exe.use_new_linker = b.option(bool, "new-linker", "Use the new linker");
  
      const use_llvm = b.option(bool, "use-llvm", "Use the llvm backend");
 -    exe.use_llvm = use_llvm;
@@ -12,9 +12,9 @@
 +    // Patch 0021 intercepts this path and spawns external GCC instead
 +    // GCC handles PowerPC64 ABI properly (.TOC., __tls_get_addr, pthread_atfork)
 +    if (target.result.cpu.arch == .powerpc64le) {
-+        exe.use_llvm = true;                // Force LLVM backend for code generation
-+        exe.use_lld = true;                 // Enable LLD code path (intercepted by patch 0021)
-+        exe.root_module.link_libc = true;   // Force libc linking
++        exe.use_llvm = true; // Force LLVM backend for code generation
++        exe.use_lld = true; // Enable LLD code path (intercepted by patch 0021)
++        exe.root_module.link_libc = true; // Force libc linking
 +    } else {
 +        exe.use_llvm = use_llvm;
 +        exe.use_lld = use_llvm;
@@ -22,10 +22,10 @@
  
      if (no_bin) {
          b.getInstallStep().dependOn(&exe.step);
-@@ -367,6 +379,14 @@
-             exe.root_module.linkSystemLibrary("c++", .{ .use_pkg_config = .no });
+@@ -353,6 +364,14 @@ pub fn build(b: *std.Build) !void {
+             exe.root_module.linkSystemLibrary("uuid", .{});
+             exe.root_module.linkSystemLibrary("ole32", .{});
          }
-         exe.root_module.link_libc = true;
 +        // GCC 14 + glibc 2.28 compatibility: link stub library for __libc_csu_init/fini
 +        if (target.result.os.tag == .linux) {
 +            exe.root_module.linkSystemLibrary("csu_compat", .{});
@@ -34,10 +34,10 @@
 +        if (target.result.cpu.arch == .powerpc64le) {
 +            exe.root_module.linkSystemLibrary("gcc", .{});
 +        }
+     }
  
-         if (target.result.os.tag == .windows) {
-             exe.root_module.linkSystemLibrary("dbghelp", .{});
-@@ -791,6 +811,13 @@
+     const semver = try std.SemanticVersion.parse(version);
+@@ -834,6 +853,13 @@ fn addCmakeCfgOptionsToExe(
      mod.addIncludePath(.{ .cwd_relative = cfg.lld_include_dir });
      mod.addIncludePath(.{ .cwd_relative = cfg.llvm_include_dir });
      mod.addLibraryPath(.{ .cwd_relative = cfg.llvm_lib_dir });
