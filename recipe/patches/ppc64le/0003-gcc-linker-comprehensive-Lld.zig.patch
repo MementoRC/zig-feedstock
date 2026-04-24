@@ -227,7 +227,7 @@
 +            }
 +
 +            if (comp.verbose_link) {
-+                Compilation.dump_argv(argv.items);
++                try Compilation.dumpArgv(io, argv.items);
 +            }
 +
 +            var child = std.process.Child.init(argv.items, arena);
