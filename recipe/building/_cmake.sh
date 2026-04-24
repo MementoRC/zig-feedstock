@@ -71,11 +71,13 @@ function cmake_fallback_build() {
 
   CMAKE_PATCHES=()
 
-  # Cross-compile stage1 host-tool split: zig-wasm2c / zig1 must run on the
-  # build host. The patch lets CC_FOR_BUILD route those two targets through
-  # add_custom_command instead of add_executable; the -D flag itself is
-  # seeded earlier (build.sh) so the initial cmake configure caches it.
-  if [[ -n "${CC_FOR_BUILD:-}" && "${CC_FOR_BUILD:-}" != "${CC:-}" ]]; then
+  # Cross-compile stage1 host-tool split (osx only): zig-wasm2c / zig1
+  # must run on the build host. The patch lets ZIG_STAGE1_HOST_CC route
+  # those two targets through add_custom_command instead of
+  # add_executable; -D flag seeded earlier (build.sh).
+  # Linux cross uses 0003-cross-CMakeLists (qemu emulator) for the same
+  # problem — applying both would cause hunk conflicts.
+  if is_osx && [[ -n "${CC_FOR_BUILD:-}" && "${CC_FOR_BUILD:-}" != "${CC:-}" ]]; then
     CMAKE_PATCHES+=(0003-cmake-stage1-host-cc-CMakeLists.txt.patch)
   fi
 
