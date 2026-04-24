@@ -43,7 +43,7 @@
      mod.addLibraryPath(.{ .cwd_relative = cfg.llvm_lib_dir });
 +
 +    // Add PREFIX/lib for conda-forge cross-compilation (zlib, zstd, pthread, etc.)
-+    if (b.graph.env_map.get("PREFIX")) |prefix| {
++    if (b.graph.environ_map.get("PREFIX")) |prefix| {
 +        const prefix_lib = b.fmt("{s}/lib", .{prefix});
 +        mod.addLibraryPath(.{ .cwd_relative = prefix_lib });
 +    }

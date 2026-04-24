@@ -1,6 +1,6 @@
 --- a/src/link/Lld.zig
 +++ b/src/link/Lld.zig
-@@ -839,6 +839,258 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
+@@ -839,6 +839,255 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
              .{},
          );
      } else {
@@ -22,13 +22,10 @@
 +            defer argv.deinit();
 +
 +            // Determine GCC path
-+            const gcc_path = std.process.getEnvVarOwned(arena, "CC") catch |err| switch (err) {
-+                error.EnvironmentVariableNotFound => if (target.cpu.arch == .powerpc64le)
-+                    "powerpc64le-conda-linux-gnu-gcc"
-+                else
-+                    "powerpc64-conda-linux-gnu-gcc",
-+                else => return err,
-+            };
++            const gcc_path = comp.environ_map.get("CC") orelse if (target.cpu.arch == .powerpc64le)
++                "powerpc64le-conda-linux-gnu-gcc"
++            else
++                "powerpc64-conda-linux-gnu-gcc";
 +            try argv.append(gcc_path);
 +
 +            // Output
@@ -189,7 +186,7 @@
 +
 +                if (use_zig_crt and comp.config.link_libc) {
 +                    add_stub: {
-+                        const src_dir = std.process.getEnvVarOwned(arena, "SRC_DIR") catch break :add_stub;
++                        const src_dir = comp.environ_map.get("SRC_DIR") orelse break :add_stub;
 +                        const stub_path = try std.fs.path.join(arena, &[_][]const u8{ src_dir, "zig-local-cache", "pthread_atfork_stub.o" });
 +                        std.fs.cwd().access(stub_path, .{}) catch break :add_stub;
 +                        try argv.append(stub_path);
