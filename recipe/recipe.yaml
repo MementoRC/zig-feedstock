@@ -338,15 +338,10 @@ outputs:
           bin:
             - ${{ conda_triplet }}-zig
           files:
-            # TODO(0.16): langref.html is not generated when building via the
-            # CMake fallback (stage2 hardcodes -Dno-langref because @cImport
-            # is unavailable there). All 0.16 builds currently rely on the
-            # fallback (the 0.15.2 bootstrap can't parse 0.16's build.zig),
-            # so skip the langref check until a stage3 `zig build langref`
-            # post-install step is wired up.
-            - if: false
-              then:
-                - ${{ library }}doc/langref.html
+            # With the upstream 0.16.0 bootstrap, `zig build` succeeds on
+            # the first attempt and produces langref.html. Keep this
+            # check active; CMake-fallback paths are no longer taken.
+            - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
             - ${{ library }}lib/zig/zig.h
             - ${{ library }}lib/zig/build-web/*
