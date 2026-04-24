@@ -211,9 +211,9 @@ outputs:
       script:
         # Explicit file: a `script: { env: {...} }` block without `file:` or
         # `content:` is treated as an empty inline script by rattler-build
-        # 0.63+ (earlier versions fell back to recipe/build.sh). CI is on
-        # the newer version, so be explicit to avoid "build.sh never ran".
-        file: build.sh
+        # 0.63+ (earlier versions fell back to the default). Be explicit,
+        # and gate on the target platform so Windows picks up build.bat.
+        file: ${{ "build.bat" if not unix else "build.sh" }}
         env:
           BUILD_NUMBER: ${{ build_number }}
           CONDA_TRIPLET: ${{ conda_triplet }}
