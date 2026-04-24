@@ -188,7 +188,7 @@
 +                    add_stub: {
 +                        const src_dir = comp.environ_map.get("SRC_DIR") orelse break :add_stub;
 +                        const stub_path = try std.fs.path.join(arena, &[_][]const u8{ src_dir, "zig-local-cache", "pthread_atfork_stub.o" });
-+                        std.fs.cwd().access(stub_path, .{}) catch break :add_stub;
++                        Io.Dir.cwd().access(io, stub_path, .{}) catch break :add_stub;
 +                        try argv.append(stub_path);
 +                    }
 +
