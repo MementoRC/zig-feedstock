@@ -99,6 +99,15 @@ EXTRA_CMAKE_ARGS=(
   -DZIG_USE_LLVM_CONFIG=ON
 )
 
+# Cross-compile stage1 host-tool split: zig-wasm2c / zig1 are build-host
+# tools; when CC ≠ CC_FOR_BUILD (e.g. osx-arm64 built on osx-64 runner)
+# CMAKE_C_COMPILER produces binaries that can't run on the build host.
+# Cache -DZIG_STAGE1_HOST_CC in the initial configure so the fallback
+# patch's if(ZIG_STAGE1_HOST_CC) branch activates when cmake reconfigures.
+if [[ -n "${CC_FOR_BUILD:-}" && "${CC_FOR_BUILD:-}" != "${CC:-}" ]]; then
+  EXTRA_CMAKE_ARGS+=(-DZIG_STAGE1_HOST_CC="${CC_FOR_BUILD}")
+fi
+
 # Remember: CPU MUST be baseline, otherwise it create non-portable zig code (optimized for a given hardware)
 EXTRA_ZIG_ARGS=(
   --search-prefix "${PREFIX}"
