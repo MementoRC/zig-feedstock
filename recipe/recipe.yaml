@@ -173,18 +173,20 @@ source:
   # even for the `osx_arm64_*` variant labels, so we can't just gate on
   # target=osx-arm64 — we'd ship an arm64 binary to an x86_64 host. Two
   # separate source entries, each gated on the build platform.
-  # osx + windows bootstraps use upstream 0.16.0 pre-built binaries to
-  # skip the 0.15.2 → CMake-fallback path entirely:
-  #   - osx: conda-forge zig_impl 0.15.2 pins libcxx 20, but 0.16 needs
-  #     libcxx 21 (ABI clash in the build env). Using 0.16.0 upstream
-  #     also sidesteps a compiler_rt.c generation bug where zig1 (baked
-  #     into stage1/zig1.wasm by older Zig) emits x86_64 asm even when
-  #     -target is aarch64-macos, breaking osx-arm64 native.
-  #   - win: MSVC compiling the CMake-fallback's zig2.c hits C2466
-  #     "cannot allocate an array of constant size 0" on zig's zero-
-  #     sized array idiom.
+  # Every platform bootstraps from upstream 0.16.0 pre-built binaries.
+  # conda-forge's zig_impl 0.15.2 can't parse 0.16's build.zig
+  # (use_new_linker / graph.io fields), which forces the CMake
+  # fallback bootstrap path — and that path hits arch-specific bugs:
+  #   - osx-arm64 native: zig1 (baked into stage1/zig1.wasm by older
+  #     Zig) emits x86_64 asm in compiler_rt.c even with -target
+  #     aarch64-macos.
+  #   - win-64: MSVC rejects zig2.c's zero-sized array idiom (C2466).
+  #   - linux-ppc64le: zig2.c compiles to functions larger than ppc64
+  #     direct-branch range (±32MB), producing operand-out-of-range
+  #     assembler errors.
+  #   - osx libcxx ABI: 0.15.2 build env pins libcxx 20, we need 21.
   # A 0.16.0 bootstrap parses 0.16's build.zig natively so `zig build`
-  # succeeds on the first attempt and we never enter CMake.
+  # succeeds on the first attempt and CMake is never touched.
   - if: build_platform == "osx-arm64"
     then:
       - url: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
@@ -199,6 +201,21 @@ source:
     then:
       - url: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
         sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+        target_directory: zig-bootstrap
+  - if: build_platform == "linux-64"
+    then:
+      - url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        target_directory: zig-bootstrap
+  - if: build_platform == "linux-aarch64"
+    then:
+      - url: https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
+        sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+        target_directory: zig-bootstrap
+  - if: build_platform == "linux-ppc64le"
+    then:
+      - url: https://ziglang.org/download/0.16.0/zig-powerpc64le-linux-0.16.0.tar.xz
+        sha256: 18800b45c08bf40b335ca5ab79aea70aca287ca969036e938155772becaeebeb
         target_directory: zig-bootstrap
 
 build:

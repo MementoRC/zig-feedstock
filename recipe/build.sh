@@ -53,19 +53,16 @@ fi
 
 # --- Main ---
 
-# On osx + windows we bootstrap from an upstream pre-built zig 0.16.0
-# tarball instead of the conda-forge zig_impl package:
-#   - osx: conda-forge zig_impl 0.15.2 pins libcxx 20 vs the LLVM-21
-#     toolchain 0.16 needs, plus the 0.15.2 → CMake-fallback path
-#     hits a stage1 compiler_rt codegen bug on arm64.
-#   - win: CMake-fallback path hits MSVC C2466 on zig2.c's zero-sized
-#     arrays.
-# A 0.16.0 bootstrap parses 0.16's build.zig, so `zig build` succeeds
-# and we never touch CMake. The binary needs its adjacent lib/ dir to
-# work, so we link/rename *in place* (keeping lib/ next to it) and
-# prepend the bootstrap dir to PATH rather than symlinking into a new
-# parent dir.
-if { is_osx || is_not_unix; } && [[ -d "${SRC_DIR}/zig-bootstrap" ]]; then
+# Every platform bootstraps from upstream 0.16.0 instead of the
+# conda-forge zig_impl 0.15.2 package. The 0.15.2 compiler can't
+# parse 0.16's build.zig (use_new_linker/graph.io), forcing a CMake
+# fallback path that has arch-specific bugs (osx-arm64 compiler_rt
+# codegen, win MSVC C2466, linux-ppc64le branch-range).  A 0.16.0
+# bootstrap parses 0.16's build.zig, so `zig build` succeeds on the
+# first attempt and CMake is never touched.  The binary needs its
+# adjacent lib/ dir to work, so we rename/hardlink in place inside
+# the bootstrap dir and prepend that dir to PATH.
+if [[ -d "${SRC_DIR}/zig-bootstrap" ]]; then
   _bootstrap_root="$(find "${SRC_DIR}/zig-bootstrap" -maxdepth 1 -type d -name 'zig-*' -print -quit)"
   if is_not_unix; then
     _bootstrap_zig="${_bootstrap_root}/zig.exe"
