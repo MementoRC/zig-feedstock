@@ -230,7 +230,13 @@ outputs:
   - package:
       name: zig_impl_${{ cross_target_platform_ }}
     build:
-      skip: not (is_native or is_cross_target) or cross_target_platform_ == "win-arm64" or cross_target_platform_ == "linux-s390x"
+      # Skip native-on-ppc64le: the upstream 0.16.0 bootstrap binary
+      # lacks the `elf64-powerpcle` OUTPUT_FORMAT entry in LdScript.zig
+      # (our patch fixes it in source but the prebuilt bootstrap can't
+      # consume it), so it can't parse conda's ppc64le libc.so linker
+      # script. The linux_64 → linux-ppc64le cross build produces the
+      # deployable package; this native build was test-only.
+      skip: not (is_native or is_cross_target) or cross_target_platform_ == "win-arm64" or cross_target_platform_ == "linux-s390x" or (is_native and cross_target_platform_ == "linux-ppc64le")
       dynamic_linking:
         missing_dso_allowlist:
           - if: osx
