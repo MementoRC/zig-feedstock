@@ -168,14 +168,25 @@ source:
       #     - patches/non_unix/Lld.zig-remove-ucrt.patch
       #     - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
     target_directory: zig-source
-  # Bootstrap zig binary from upstream (ziglang.org) for osx-arm64.
+  # Bootstrap zig binary from upstream (ziglang.org) for osx.
   # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
   # the LLVM-21 compiler stack required by 0.16. Using upstream's pre-built
   # binary sidesteps the solver conflict; see build.sh for the handoff.
-  - if: osx and arm64
+  #
+  # The tarball must match the BUILD machine's arch (what rattler-build
+  # runs on), not the target. conda-forge's Azure uses osx-64 runners
+  # even for the `osx_arm64_*` variant labels, so we can't just gate on
+  # target=osx-arm64 — we'd ship an arm64 binary to an x86_64 host. Two
+  # separate source entries, each gated on the build platform.
+  - if: build_platform == "osx-arm64"
     then:
       - url: https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
         sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+        target_directory: zig-bootstrap
+  - if: build_platform == "osx-64"
+    then:
+      - url: https://ziglang.org/download/0.15.2/zig-x86_64-macos-0.15.2.tar.xz
+        sha256: 375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f
         target_directory: zig-bootstrap
 
 build:
@@ -253,10 +264,12 @@ outputs:
                 - libxml2-devel
 
         # Self-hosting: build zig with zig.
-        # On osx-arm64 we bootstrap from an upstream tarball (see `source:`)
-        # because the published conda-forge zig_impl 0.15.2 pins libcxx 20
-        # and conflicts with the LLVM-21 toolchain required by 0.16.
-        - if: not (osx and arm64)
+        # On osx (either arch) we bootstrap from an upstream tarball (see
+        # `source:`) because the published conda-forge zig_impl 0.15.2
+        # pins libcxx 20.* and conflicts with the LLVM-21 toolchain
+        # required by 0.16. Other platforms still use the conda-forge
+        # bootstrap.
+        - if: not osx
           then:
             - zig_impl_${{ build_platform }} >=0.15.2
       host:
@@ -435,20 +448,27 @@ outputs:
       build:
         - ${{ m2 }}bash
         - python 3.12.*
-        # Need zig to compile .exe shims on non-Unix (cross-compiler shim)
+        # Need zig to compile .exe shims on non-Unix (cross-compiler shim).
+        # NB: lower bound is the previous conda-forge release (>=0.15.2),
+        # not ${{ version }}. A strict ==0.16.0 pin during the first 0.16
+        # CI run is unsatisfiable because the matching zig_impl isn't
+        # published in conda-forge yet, and a sibling variant's just-built
+        # impl isn't visible in the cross variant's test environment.
+        # run_exports still enforce proper ABI compat for end users.
         - if: is_cross_compiler and not unix
           then:
-            - zig_impl_${{ xc_build_platform }} >=${{ version }}
+            - zig_impl_${{ xc_build_platform }} >=0.15.2
       host:
         - if: not is_cross_compiler
           then:
             - ${{ pin_subpackage("zig_impl_" ~ cross_target_platform_, exact=True) }}
       run:
         # For native/cross-target: depend on zig_impl for same cross_target_platform_ (pin_subpackage works)
-        # For cross-compiler: depend on zig_impl for BUILD platform (external package)
+        # For cross-compiler: depend on zig_impl for BUILD platform (external package).
+        # See note above re: >=0.15.2 lower bound during 0.16 CI.
         - if: is_cross_compiler
           then:
-            - zig_impl_${{ xc_build_platform }} >=${{ version }}
+            - zig_impl_${{ xc_build_platform }} >=0.15.2
           else:
             - ${{ pin_subpackage("zig_impl_" ~ cross_target_platform_, exact=True) }}
         - if: cross_target_platform_ == "linux-ppc64le"
