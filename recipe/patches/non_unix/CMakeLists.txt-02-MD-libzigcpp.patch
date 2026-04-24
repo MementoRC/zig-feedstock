@@ -5,7 +5,7 @@
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -708,6 +710,8 @@
+@@ -518,6 +518,8 @@
      -Wno-comment
    )
  else()

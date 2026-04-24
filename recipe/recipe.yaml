@@ -156,17 +156,12 @@ source:
           - patches/ppc64le/0003-linker-redirect-link.zig.patch
           - patches/ppc64le/0003-ldscript-output-format.patch
           - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
-      # TODO(0.16): non_unix patches are not yet rebased for 0.16.0.
-      # The first one (build.zig-maxrss-search-prefix.patch) already fails
-      # to apply (context-shift in build.zig); comment them out for now so
-      # Windows CI at least reaches the build step. See
-      # conda-forge/zig-feedstock#102 for a regenerated set.
-      # - if: not unix
-      #   then:
-      #     - patches/non_unix/build.zig-maxrss-search-prefix.patch
-      #     - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
-      #     - patches/non_unix/Lld.zig-remove-ucrt.patch
-      #     - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
+      - if: not unix
+        then:
+          - patches/non_unix/build.zig-maxrss-search-prefix.patch
+          - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
+          - patches/non_unix/Lld.zig-remove-ucrt.patch
+          - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
     target_directory: zig-source
   # Bootstrap zig binary from upstream (ziglang.org) for osx.
   # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
