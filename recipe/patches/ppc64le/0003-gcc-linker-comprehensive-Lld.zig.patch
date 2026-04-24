@@ -1,6 +1,6 @@
 --- a/src/link/Lld.zig
 +++ b/src/link/Lld.zig
-@@ -839,6 +839,255 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
+@@ -839,6 +839,260 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
              .{},
          );
      } else {
@@ -230,18 +230,23 @@
 +                try Compilation.dumpArgv(io, argv.items);
 +            }
 +
-+            var child = std.process.Child.init(argv.items, arena);
-+            child.stdin_behavior = .Inherit;
-+            child.stdout_behavior = .Inherit;
-+            child.stderr_behavior = .Inherit;
-+
-+            const term = child.spawnAndWait() catch |err| {
++            var child = std.process.spawn(io, .{
++                .argv = argv.items,
++                .stdin = .inherit,
++                .stdout = .inherit,
++                .stderr = .inherit,
++            }) catch |err| {
 +                std.log.err("Failed to spawn GCC: {s}", .{@errorName(err)});
 +                return error.LinkFailed;
 +            };
 +
++            const term = child.wait(io) catch |err| {
++                std.log.err("Failed to wait for GCC: {s}", .{@errorName(err)});
++                return error.LinkFailed;
++            };
++
 +            switch (term) {
-+                .Exited => |code| {
++                .exited => |code| {
 +                    if (code == 0) return;
 +                    std.log.err("GCC linker exited with code: {d}", .{code});
 +                    return error.LinkFailed;
