@@ -60,31 +60,42 @@ context:
   build_triplet: >-
     ${{
       "x86_64-conda-linux-gnu"                      if build_platform == "linux-64"                      else
+      "aarch64-conda-linux-gnu"                     if build_platform == "linux-aarch64"                 else
+      "powerpc64le-conda-linux-gnu"                 if build_platform == "linux-ppc64le"                 else
       "x86_64-apple-darwin13.4.0"                   if build_platform == "osx-64"                        else
       "arm64-apple-darwin20.0.0"                    if build_platform == "osx-arm64"                     else
       "x86_64-w64-mingw32"                          if build_platform == "win-64"                        else
+      "aarch64-w64-mingw32"                         if build_platform == "win-arm64"                     else
       "unknown"
     }}
 
-  #    "aarch64-conda-linux-gnu"                    if build_platform == "linux-aarch64"                 else
-  #    "powerpc64le-conda-linux-gnu"                if build_platform == "linux-ppc64le"                 else
-  #    "aarch64-w64-mingw32"                        if build_platform == "win-arm64"                     else
+  # Same mapping as build_triplet but keyed on target_platform.
+  # Used by xc_build_triplet for unhosted cross-compilers (runs on target_platform).
+  target_triplet: >-
+    ${{
+      "x86_64-conda-linux-gnu"                      if target_platform == "linux-64"                     else
+      "aarch64-conda-linux-gnu"                     if target_platform == "linux-aarch64"                else
+      "powerpc64le-conda-linux-gnu"                 if target_platform == "linux-ppc64le"                else
+      "x86_64-apple-darwin13.4.0"                   if target_platform == "osx-64"                       else
+      "arm64-apple-darwin20.0.0"                    if target_platform == "osx-arm64"                    else
+      "x86_64-w64-mingw32"                          if target_platform == "win-64"                       else
+      "aarch64-w64-mingw32"                         if target_platform == "win-arm64"                    else
+      "unknown"
+    }}
 
   is_hosted_xcompiler: ${{ build_platform == target_platform and cross_target_platform_ != target_platform and cross_build_platform == build_platform }}
-  is_unhosted_xcompiler: ${{ cross_target_platform_ == "osx-64" and target_platform == "osx-arm64" or cross_target_platform_ == "win-64" and target_platform == "win-arm64" }}
+  is_unhosted_xcompiler: ${{ target_platform != build_platform and cross_target_platform_ != target_platform and cross_build_platform == build_platform }}
   xc_build_platform: >-
     ${{
       build_platform                                if is_hosted_xcompiler                               else
-      "osx-arm64"                                   if cross_target_platform_ == "osx-64"                else
-      "win-arm64"                                   if cross_target_platform_ == "win-64"                else
+      target_platform                               if is_unhosted_xcompiler                             else
       "unknown"
     }}
 
   xc_build_triplet: >-
     ${{
-      "arm64-apple-darwin20.0.0"                    if cross_target_platform_ == "osx-64"                else
-      "aarch64-w64-mingw32"                         if cross_target_platform_ == "win-64"                else
-      build_triplet
+      build_triplet                                 if not is_unhosted_xcompiler                         else
+      target_triplet
     }}
 
   is_native: ${{ build_platform == target_platform and cross_target_platform_ == build_platform }}

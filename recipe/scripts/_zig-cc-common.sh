@@ -68,12 +68,21 @@ for _arg in "$@"; do
 done
 
 # --- Sysroot detection (Linux only) ---
+# Search order: CONDA_PREFIX > BUILD_PREFIX > CONDA_BUILD_SYSROOT
+# BUILD_PREFIX fallback is needed for cross-build native tool sub-builds
+# (CROSS_TOOLCHAIN_FLAGS_NATIVE) where the x86_64 sysroot lives in
+# BUILD_PREFIX but CONDA_PREFIX may not point there.
 _sysroot_flags=()
 if [[ "$(uname -s)" == "Linux" ]] && [[ "@ZIG_TARGET@" != "native" ]]; then
     _arch="@ZIG_TARGET_ARCH@"
-    _sr="${CONDA_PREFIX}/${_arch}-conda-linux-gnu/sysroot"
-    [[ ! -d "${_sr}" ]] && _sr="${CONDA_BUILD_SYSROOT:-}"
-    if [[ -d "${_sr}" ]]; then
+    _sr=""
+    for _candidate in \
+        "${CONDA_PREFIX:+${CONDA_PREFIX}/${_arch}-conda-linux-gnu/sysroot}" \
+        "${BUILD_PREFIX:+${BUILD_PREFIX}/${_arch}-conda-linux-gnu/sysroot}" \
+        "${CONDA_BUILD_SYSROOT:-}"; do
+        [[ -d "${_candidate:-}" ]] && _sr="${_candidate}" && break
+    done
+    if [[ -n "${_sr}" ]]; then
         _sysroot_flags+=(-isysroot "${_sr}" -L"${_sr}/usr/lib64" -L"${_sr}/usr/lib" -L"${_sr}/lib64" -L"${_sr}/lib")
     fi
 fi
@@ -164,12 +173,14 @@ while [[ $i -lt $argc ]]; do
         # macOS: -isysroot is a compiler flag; ld64.lld needs -syslibroot.
         # zig's patched MachO lld path may not translate -isysroot → comp.sysroot,
         # so machoLink never emits -syslibroot and lld can't find libSystem.tbd.
-        # Fix: strip -isysroot and re-emit as -Wl,-syslibroot,-Wl,<path> so the
-        # sysroot goes directly to lld regardless of zig's cc-driver translation.
+        # Fix: strip -isysroot and re-emit as -Wl,-syslibroot,<path> (single comma-
+        # joined token). Two-token form (-Wl,-syslibroot -Wl,<path>) causes zig's cc
+        # driver to pass them as independent linker args: lld sees -syslibroot with no
+        # path, and <path> as an unrecognized positional — sysroot is never configured.
         -isysroot)
             next_i=$((i + 1))
             if [[ $next_i -lt $argc ]]; then
-                args+=("-Wl,-syslibroot" "-Wl,${argv[$next_i]}")
+                args+=("-Wl,-syslibroot,${argv[$next_i]}")
                 i=$next_i
             fi
             ;;
@@ -185,12 +196,23 @@ while [[ $i -lt $argc ]]; do
         # -lgcc_eh: GCC exception handling — zig uses its own EH mechanism
         # -lgcc_s:  GCC shared runtime — zig uses its own runtime
         -lgcc_eh|-lgcc_s) ;;
+        # UNIX-only libraries not present on Windows targets.
+        # -ldl:      dlopen/dlsym → LoadLibrary/GetProcAddress (kernel32), not a lib
+        # -lpthread: Win32 threads; zig provides pthreads via its Win32 adapter
+        # Pass through unchanged on non-Windows targets (Linux/macOS need them).
+        -ldl|-lpthread)
+            [[ "@ZIG_TARGET@" == *-windows-* ]] || args+=("$arg")
+            ;;
         # GNU ld colon-prefix syntax (-l:filename) for known zig-provided libs
         # The -l: prefix means "exact filename match" (GNU ld extension).
         # Zig's linker hits unreachable code when it sees this syntax.
         # For targets where zig provides pthreads natively (Windows, Linux via
         # libc), the static-pthread request is unnecessary and panics the linker.
         -l:libpthread.a|-l:libpthread.so*) ;;
+        # macOS: cmake generates bare -l (empty library name) for pthread/dl/atomic
+        # since those live in libSystem and cmake vars are empty. ld64.lld rejects
+        # bare -l with "library not found for -l"; filter them (harmless no-ops).
+        -l) ;;
         *) args+=("$arg") ;;
     esac
     ((i++))
@@ -226,6 +248,14 @@ if (( _use_lld )); then
         [[ "$_a" == "-fuse-ld=lld" ]] && _has_explicit=1 && break
     done
     (( _has_explicit )) || _lld_flag=(-fuse-ld=lld)
+    # Disable ELF dependent library specifiers (#pragma comment(lib, ...))
+    # on Linux. LLD resolves these separately from -l flags and may fail
+    # when the sysroot lacks stub libraries (glibc ≥2.34 merges libdl/
+    # libpthread into libc). The specifiers are always redundant — cmake
+    # and build systems add explicit -l flags on the link command line.
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        _lld_flag+=(-Wl,--no-dependent-libraries)
+    fi
 fi
 
 # --- Translate conda triplets to zig triplets in -target args ---

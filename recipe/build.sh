@@ -134,6 +134,12 @@ fi
 if is_not_unix; then
   EXTRA_CMAKE_ARGS+=(
     -DZIG_SHARED_LLVM=OFF
+    # Force dynamic CRT (/MD) for zigcpp objects so their /DEFAULTLIB
+    # directives emit ucrt.lib (dynamic), matching what bootstrap zig's
+    # Lld.zig adds. Without this, cmake may compile with /MT (static)
+    # producing /DEFAULTLIB:libucrt -- then lld-link sees both libucrt.lib
+    # and ucrt.lib and fails with duplicate symbols.
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
   )
 else
   EXTRA_CMAKE_ARGS+=(-DZIG_SHARED_LLVM=ON)
