@@ -1,0 +1,69 @@
+--- a/test/behavior/floatop.zig
++++ b/test/behavior/floatop.zig
+@@ -976,10 +976,62 @@
+     var v: @Vector(4, f32) = [_]f32{ 1.1, 2.2, 0.3, 0.4 };
+     _ = &v;
+     const result = @log2(v);
+-    try expect(@log2(@as(f32, 1.1)) == result[0]);
+-    try expect(@log2(@as(f32, 2.2)) == result[1]);
+-    try expect(@log2(@as(f32, 0.3)) == result[2]);
+-    try expect(@log2(@as(f32, 0.4)) == result[3]);
++    {
++        const scalar = @log2(@as(f32, 1.1));
++        const vec_lane = result[0];
++        if (scalar != vec_lane) {
++            const sb: u32 = @bitCast(scalar);
++            const vb: u32 = @bitCast(vec_lane);
++            const diff: u32 = if (sb > vb) sb - vb else vb - sb;
++            std.debug.print(
++                "\n[DIAG] @log2 vector mismatch lane 0 on {s}-{s}-{s}: scalar={x:0>8} ({d}), vector={x:0>8} ({d}), ulp_diff={d}\n",
++                .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag), @tagName(builtin.target.abi), sb, scalar, vb, vec_lane, diff },
++            );
++            return error.TestUnexpectedResult;
++        }
++    }
++    {
++        const scalar = @log2(@as(f32, 2.2));
++        const vec_lane = result[1];
++        if (scalar != vec_lane) {
++            const sb: u32 = @bitCast(scalar);
++            const vb: u32 = @bitCast(vec_lane);
++            const diff: u32 = if (sb > vb) sb - vb else vb - sb;
++            std.debug.print(
++                "\n[DIAG] @log2 vector mismatch lane 1 on {s}-{s}-{s}: scalar={x:0>8} ({d}), vector={x:0>8} ({d}), ulp_diff={d}\n",
++                .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag), @tagName(builtin.target.abi), sb, scalar, vb, vec_lane, diff },
++            );
++            return error.TestUnexpectedResult;
++        }
++    }
++    {
++        const scalar = @log2(@as(f32, 0.3));
++        const vec_lane = result[2];
++        if (scalar != vec_lane) {
++            const sb: u32 = @bitCast(scalar);
++            const vb: u32 = @bitCast(vec_lane);
++            const diff: u32 = if (sb > vb) sb - vb else vb - sb;
++            std.debug.print(
++                "\n[DIAG] @log2 vector mismatch lane 2 on {s}-{s}-{s}: scalar={x:0>8} ({d}), vector={x:0>8} ({d}), ulp_diff={d}\n",
++                .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag), @tagName(builtin.target.abi), sb, scalar, vb, vec_lane, diff },
++            );
++            return error.TestUnexpectedResult;
++        }
++    }
++    {
++        const scalar = @log2(@as(f32, 0.4));
++        const vec_lane = result[3];
++        if (scalar != vec_lane) {
++            const sb: u32 = @bitCast(scalar);
++            const vb: u32 = @bitCast(vec_lane);
++            const diff: u32 = if (sb > vb) sb - vb else vb - sb;
++            std.debug.print(
++                "\n[DIAG] @log2 vector mismatch lane 3 on {s}-{s}-{s}: scalar={x:0>8} ({d}), vector={x:0>8} ({d}), ulp_diff={d}\n",
++                .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag), @tagName(builtin.target.abi), sb, scalar, vb, vec_lane, diff },
++            );
++            return error.TestUnexpectedResult;
++        }
++    }
+ }
+
+ test "@log10 f16" {

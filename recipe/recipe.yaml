@@ -163,7 +163,7 @@ source:
           - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
           - patches/non_unix/Lld.zig-remove-ucrt.patch
           - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
-          - patches/non_unix/test-floatop-skip-log2-vec-win-msvc.patch
+          - patches/non_unix/test-floatop-log2-vec-diagnostics.patch
     target_directory: zig-source
   # Bootstrap zig binary from upstream (ziglang.org) for osx.
   # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
