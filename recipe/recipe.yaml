@@ -163,6 +163,7 @@ source:
           - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
           - patches/non_unix/Lld.zig-remove-ucrt.patch
           - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
+          - patches/non_unix/test-floatop-skip-log2-vec-win-msvc.patch
     target_directory: zig-source
   # Bootstrap zig binary from upstream (ziglang.org) for osx.
   # The conda-forge zig_impl 0.15.2 pins libcxx 20.*, which clashes with
@@ -261,9 +262,9 @@ outputs:
           CONDA_ZIG_HOST: ${{ conda_triplet ~ "-zig" }}
 
           # CMake fallback: the 0.15.2 bootstrap can't parse 0.16's build.zig
-          # (new fields like `use_new_linker`, `io`) — fall back to upstream's
-          # CMake-driven stage1→stage2 bootstrap when `zig build` rejects it.
-          CMAKE_FALLBACK: "1"
+          # (new fields like `use_new_linker`, `io`) - fall back to upstream's
+          # CMake-driven stage1-stage2 bootstrap when `zig build` rejects it.
+          CMAKE_FALLBACK: "0"
           
           # --- FORCING REBUILD of native zig due to incompatible previous build version in conda-forge ---
           # BUILD_NATIVE_ZIG: ${{ cross_target_platform_ == "linux-ppc64le" and is_cross_compiler }}
