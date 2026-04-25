@@ -157,6 +157,8 @@ fi
 if is_not_unix; then
   EXTRA_CMAKE_ARGS+=(
     -DZIG_SHARED_LLVM=OFF
+    # Bootstrap libucrt/ucrt confilct may come from /DEFAULTLIB:libucrt (hopefully not from LLVM)
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
   )
 else
   EXTRA_CMAKE_ARGS+=(-DZIG_SHARED_LLVM=ON)
