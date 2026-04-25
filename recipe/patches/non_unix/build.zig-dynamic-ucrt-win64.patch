@@ -10,9 +10,12 @@
 # zigcpp.a's DEFAULTLIB becomes ucrt (dynamic) — matching the bootstrap.
 #
 # This build.zig patch makes the dynamic-CRT choice explicit and symmetric:
-# it sets link_mode = .dynamic on Windows/MSVC so zig's own build system
+# it sets exe.linkage = .dynamic on Windows/MSVC so zig's own build system
 # unambiguously requests ucrt.lib (dynamic), eliminating the bootstrap's
 # libucrt.lib vs ucrt.lib duplicate-symbol race regardless of default heuristics.
+#
+# NOTE: In zig 0.16, `link_mode` was removed from `std.Build.Module`. The
+# correct API is `exe.linkage` (a field on `std.Build.Step.Compile` itself).
 
 --- a/build.zig
 +++ b/build.zig
@@ -27,7 +30,7 @@
 +        // DEFAULTLIB pragma also references it — producing ~40 "duplicate
 +        // symbol" lld-link errors (__acrt_iob_func, errno, abort, malloc, ...).
 +        if (target.result.os.tag == .windows and target.result.abi == .msvc) {
-+            exe.root_module.link_mode = .dynamic;
++            exe.linkage = .dynamic;
 +        }
      }
 
