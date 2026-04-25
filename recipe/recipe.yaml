@@ -159,6 +159,7 @@ source:
       - if: not unix
         then:
           - patches/non_unix/build.zig-maxrss-search-prefix.patch
+          - patches/non_unix/build.zig-dynamic-ucrt-win64.patch
           - patches/non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch
           - patches/non_unix/Lld.zig-remove-ucrt.patch
           - patches/non_unix/CMakeLists.txt-02-MD-libzigcpp.patch
