@@ -195,9 +195,17 @@ SYNCHRONIZATION_DEF
       fi
 
       # Step 5: ARM64 intrinsic stubs (only for aarch64-windows-gnu).
+      # Sets _crt_outdir for the subsequent CRT object compilation block:
+      # aarch64 emits CRT objects into libarm64/ (arch-specific dir, prevents
+      # cross-arch contamination); other archs keep historical lib-common/.
       if [[ "${_win_arch}" == "aarch64" ]]; then
+        _mingw_libarm64="${_mingw_common}/../libarm64"
+        mkdir -p "${_mingw_libarm64}"
         source "${RECIPE_DIR}/building/_win_arm64_stubs.sh"
-        create_win_arm64_stubs "${_zig_bin}" "${_win_target}" "${_mingw_common}"
+        create_win_arm64_stubs "${_zig_bin}" "${_win_target}" "${_mingw_libarm64}"
+        _crt_outdir="${_mingw_libarm64}"
+      else
+        _crt_outdir="${_mingw_common}"
       fi
 
       # Pre-compile Windows CRT startup objects for flexlink.
@@ -210,38 +218,60 @@ SYNCHRONIZATION_DEF
       _win_inc="${_zig_lib}/libc/include/any-windows-any"
 
       if [[ -d "${_mingw_crt}" ]]; then
-        dbg echo "=== Compiling MinGW CRT startup objects from ${_mingw_crt} ==="
+        dbg echo "=== Compiling MinGW CRT startup objects from ${_mingw_crt} -> ${_crt_outdir} ==="
         dbg echo "=== CRT sources: $(ls "${_mingw_crt}" | tr '\n' ' ') ==="
 
-        _crt_flags=(-target "${_win_target}" -mcpu=baseline
-                    -I"${_mingw_inc}" -I"${_win_inc}"
-                    -D_CRTIMP= -D__USE_MINGW_ACCESS -c)
+        # CRT compile flags must match zig's internal addCrtCcArgs (src/libs/mingw.zig)
+        # exactly, otherwise oscalls.h and other internal headers reject inclusion via
+        # `#error ERROR: Use of C runtime library internal header file.`. Keep this in
+        # lockstep with upstream zig's addCcArgs+addCrtCcArgs flag set.
+        _crt_flags=(-target "${_win_target}" -mcpu=baseline -c
+                    -std=gnu11
+                    -D__USE_MINGW_ANSI_STDIO=0
+                    -D__MSVCRT_VERSION__=0x700
+                    -D_CRTBLD
+                    -D_SYSCRT=1
+                    -D_WIN32_WINNT=0x0f00
+                    -DCRTDLL=1
+                    -DHAVE_CONFIG_H
+                    -isystem "${_win_inc}"
+                    -I"${_mingw_inc}")
+
+        # Helper: compile one CRT object, surface errors (do NOT swallow).
+        # Captures stderr to a log; on success emits dbg trace; on failure
+        # prints log to stderr and returns 1 to abort import-lib generation.
+        _compile_crt_obj() {
+          local src="$1" obj="$2" extra="${3:-}"
+          local log; log=$(mktemp)
+          # shellcheck disable=SC2086
+          if "${_zig_bin}" cc "${_crt_flags[@]}" ${extra} "${src}" -o "${obj}" >"${log}" 2>&1; then
+            dbg cat "${log}"
+            dbg echo "=== Compiled $(basename "${obj}") ==="
+            rm -f "${log}"
+            return 0
+          fi
+          echo "ERROR: failed to compile $(basename "${obj}") for ${_win_target}:" >&2
+          cat "${log}" >&2
+          rm -f "${log}"
+          return 1
+        }
 
         # crt2.o -- console application entry (main)
-        _crt2_obj="${_mingw_common}/crt2.o"
+        _crt2_obj="${_crt_outdir}/crt2.o"
         if [[ ! -f "${_crt2_obj}" ]] && [[ -f "${_mingw_crt}/crtexe.c" ]]; then
-          "${_zig_bin}" cc "${_crt_flags[@]}" \
-            "${_mingw_crt}/crtexe.c" -o "${_crt2_obj}" 2>&1 | \
-            { dbg cat || true; } && \
-            dbg echo "=== Compiled crt2.o ==" || true
+          _compile_crt_obj "${_mingw_crt}/crtexe.c" "${_crt2_obj}" || return 1
         fi
 
         # crt2win.o -- GUI application entry (WinMain)
-        _crt2win_obj="${_mingw_common}/crt2win.o"
+        _crt2win_obj="${_crt_outdir}/crt2win.o"
         if [[ ! -f "${_crt2win_obj}" ]] && [[ -f "${_mingw_crt}/crtexewin.c" ]]; then
-          "${_zig_bin}" cc "${_crt_flags[@]}" -D_WINDOWS \
-            "${_mingw_crt}/crtexewin.c" -o "${_crt2win_obj}" 2>&1 | \
-            { dbg cat || true; } && \
-            dbg echo "=== Compiled crt2win.o ===" || true
+          _compile_crt_obj "${_mingw_crt}/crtexewin.c" "${_crt2win_obj}" "-D_WINDOWS" || return 1
         fi
 
         # dllcrt2.o -- DLL entry (DllMain)
-        _dllcrt2_obj="${_mingw_common}/dllcrt2.o"
+        _dllcrt2_obj="${_crt_outdir}/dllcrt2.o"
         if [[ ! -f "${_dllcrt2_obj}" ]] && [[ -f "${_mingw_crt}/crtdll.c" ]]; then
-          "${_zig_bin}" cc "${_crt_flags[@]}" \
-            "${_mingw_crt}/crtdll.c" -o "${_dllcrt2_obj}" 2>&1 | \
-            { dbg cat || true; } && \
-            dbg echo "=== Compiled dllcrt2.o ===" || true
+          _compile_crt_obj "${_mingw_crt}/crtdll.c" "${_dllcrt2_obj}" || return 1
         fi
       else
         dbg echo "=== MinGW CRT sources not found at ${_mingw_crt} ==="

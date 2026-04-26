@@ -34,9 +34,13 @@ for _arg in "$@"; do
         _zig_lib="${CONDA_PREFIX}/lib/zig"
         _mingw_common="${_zig_lib}/libc/mingw/lib-common"
         _mingw_arch="${_zig_lib}/libc/mingw/lib-@ZIG_TARGET_ARCH@"
+        _mingw_libpath="${_mingw_common}:${_mingw_arch}"
+        if [[ "@ZIG_TARGET@" == "aarch64-windows-gnu" ]]; then
+            _mingw_libpath="${_mingw_libpath}:${_zig_lib}/libc/mingw/libarm64"
+        fi
         echo "install: ${_zig_lib}/"
         echo "programs: =${CONDA_PREFIX}/bin/"
-        echo "libraries: =${_mingw_common}:${_mingw_arch}:${_zig_lib}"
+        echo "libraries: =${_mingw_libpath}:${_zig_lib}"
         exit 0
     fi
 done
@@ -50,13 +54,21 @@ for _arg in "$@"; do
     if [[ "$_arg" == -print-file-name=* ]]; then
         _name="${_arg#-print-file-name=}"
         _zig_lib="${CONDA_PREFIX}/lib/zig"
-        for _dir in \
-            "${CONDA_PREFIX}/lib/zig-llvm/lib" \
-            "${CONDA_PREFIX}/lib" \
-            "${_zig_lib}/libc/mingw/lib-common" \
-            "${_zig_lib}/libc/mingw/lib-@ZIG_TARGET_ARCH@" \
-            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-common" \
-            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-@ZIG_TARGET_ARCH@"; do
+        _pfn_dirs=(
+            "${CONDA_PREFIX}/lib/zig-llvm/lib"
+            "${CONDA_PREFIX}/lib"
+            "${_zig_lib}/libc/mingw/lib-common"
+            "${_zig_lib}/libc/mingw/lib-@ZIG_TARGET_ARCH@"
+            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-common"
+            "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/lib-@ZIG_TARGET_ARCH@"
+        )
+        if [[ "@ZIG_TARGET@" == "aarch64-windows-gnu" ]]; then
+            _pfn_dirs+=(
+                "${_zig_lib}/libc/mingw/libarm64"
+                "${CONDA_PREFIX}/Library/lib/zig/libc/mingw/libarm64"
+            )
+        fi
+        for _dir in "${_pfn_dirs[@]}"; do
             if [[ -e "${_dir}/${_name}" ]]; then
                 echo "${_dir}/${_name}"
                 exit 0
@@ -203,6 +215,15 @@ while [[ $i -lt $argc ]]; do
         -ldl|-lpthread)
             [[ "@ZIG_TARGET@" == *-windows-* ]] || args+=("$arg")
             ;;
+        # ARM64 Windows uses ucrt only -- no msvcrt.lib in zig's MinGW sysroot.
+        # flexlink/OCaml inject -lmsvcrt via BYTECCLIBS; translate to -lucrtbase.
+        -lmsvcrt)
+            if [[ "@ZIG_TARGET@" == *-windows-* ]]; then
+                args+=("-lucrtbase")
+            else
+                args+=("$arg")
+            fi
+            ;;
         # GNU ld colon-prefix syntax (-l:filename) for known zig-provided libs
         # The -l: prefix means "exact filename match" (GNU ld extension).
         # Zig's linker hits unreachable code when it sees this syntax.
@@ -308,7 +329,7 @@ done
 # Only inject on link steps (no -c flag in args).
 _fpreset_stub=()
 if [[ "@ZIG_TARGET@" == "aarch64-windows-gnu" ]]; then
-    _stub="${CONDA_PREFIX}/lib/zig/libc/mingw/lib-common/_fpreset_arm64.o"
+    _stub="${CONDA_PREFIX}/lib/zig/libc/mingw/libarm64/_fpreset_arm64.o"
     _is_compile_only=0
     for _a in "${_translated_args[@]}"; do
         [[ "$_a" == "-c" ]] && _is_compile_only=1 && break

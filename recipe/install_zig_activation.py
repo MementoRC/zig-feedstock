@@ -259,6 +259,7 @@ def install_zig_cc_wrappers(
         "@ZIG_BIN@": zig_bin,
         "@ZIG_TARGET@": cc_target,
         "@ZIG_TARGET_ARCH@": target_arch,
+        "@WRAPPER_PREFIX@": f"{conda_triplet}-",
     }
 
     if is_nonunix:
@@ -271,13 +272,13 @@ def install_zig_cc_wrappers(
             zig_bin_name = zig_bin.rsplit("\\", 1)[-1]
             for mode, exe_name in [("cc", "zig-cc"), ("c++", "zig-cxx")]:
                 mode_replacements = {**replacements, "@ZIG_CC_MODE@": mode, "@ZIG_BIN_NAME@": zig_bin_name}
-                _compile_c_shim(cc_src, wrapper_dir / f"{exe_name}.exe", mode_replacements)
+                _compile_c_shim(cc_src, wrapper_dir / f"{conda_triplet}-{exe_name}.exe", mode_replacements)
 
         # Keep .bat for simple pass-through tools (no flag filtering needed)
         for name in ["zig-ar", "zig-ranlib", "zig-asm", "zig-rc", "zig-lld"]:
             src = scripts_dir / f"{name}.bat"
             if src.exists():
-                _install_template(src, wrapper_dir / f"{name}.bat", replacements)
+                _install_template(src, wrapper_dir / f"{conda_triplet}-{name}.bat", replacements)
 
     else:
         wrapper_dir = prefix / "share" / "zig" / "wrappers"
@@ -285,12 +286,12 @@ def install_zig_cc_wrappers(
         for helper in ["_zig-cc-common.sh", "_zig-force-load-common.sh"]:
             src = scripts_dir / helper
             if src.exists():
-                _install_template(src, wrapper_dir / helper, replacements)
+                _install_template(src, wrapper_dir / f"{conda_triplet}-{helper}", replacements)
         wrappers = ["zig-cc", "zig-cxx", "zig-ar", "zig-ranlib", "zig-asm", "zig-rc", "zig-lld", "zig-force-load-cc", "zig-force-load-cxx"]
         for name in wrappers:
             src = scripts_dir / f"{name}.sh"
             if src.exists():
-                _install_template(src, wrapper_dir / name, replacements, executable=True)
+                _install_template(src, wrapper_dir / f"{conda_triplet}-{name}", replacements, executable=True)
 
 
 def install_unix_cross_wrappers(

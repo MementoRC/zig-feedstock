@@ -6,7 +6,7 @@
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -708,8 +708,9 @@
+@@ -710,8 +710,9 @@
      -Wno-comment
    )
  else()
@@ -15,3 +15,5 @@
 -set_property(TARGET zigcpp PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 +set_property(TARGET zigcpp PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
  endif()
+
+ target_include_directories(zigcpp PUBLIC
