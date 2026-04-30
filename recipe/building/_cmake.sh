@@ -171,6 +171,7 @@ function cmake_fallback_build() {
 
   if [[ "${target_platform}" == "linux-ppc64le" ]]; then
     CMAKE_PATCHES+=(0005-ppc64le-mlongcall-CMakeLists.txt.patch)
+    CMAKE_PATCHES+=(0006-ppc64le-lld-bundle-CMakeLists.txt.patch)
   fi
 
   if is_linux; then
@@ -234,7 +235,7 @@ function cmake_fallback_build() {
       fi
     fi
     dbg echo "Re-configuring cmake with patched CMakeLists.txt..."
-    if ! configure_cmake "${build_dir}" "${install_prefix}"; then
+  if ! configure_cmake "${build_dir}" "${install_prefix}"; then
       echo "ERROR: cmake re-configure after patch application failed" >&2
       return 1
     fi
@@ -290,6 +291,12 @@ function cmake_fallback_build() {
       exit 1
     fi
 
+    # Phase 3 hardcodes its zig-build invocation (does NOT pull EXTRA_ZIG_ARGS).
+    # Stage3 'compile exe zig ReleaseFast' declares ~7.8 GB upper bound; on osx-arm64
+    # GHA runners zig auto-budgets --maxrss to ~7 GiB based on system RAM, tripping
+    # `assert(memory_blocked_steps.items.len == 0)` in build_runner.zig:679. Pin
+    # to 8 GiB here too so cross builds (e.g. osx-arm64 -> osx-64) clear the gate.
+    # Linux uses 7500000000 in EXTRA_ZIG_ARGS; this Phase 3 path is osx-only.
     dbg echo "Phase 3: cross-compiling stage3 via ${host_zig2} -> ${install_prefix}"
     (
       cd "${source_dir}" &&
@@ -297,6 +304,7 @@ function cmake_fallback_build() {
         --zig-lib-dir "${source_dir}/lib" \
         --prefix "${install_prefix}" \
         --search-prefix "${PREFIX}" \
+        --maxrss 8589934592 \
         "-Dversion-string=${PKG_VERSION:-0.16.0}" \
         "-Dtarget=${ZIG_TRIPLET}" \
         -Dcpu=baseline \

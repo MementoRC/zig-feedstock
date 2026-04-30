@@ -288,7 +288,7 @@ outputs:
           bin:
             - ${{ conda_triplet }}-zig
           files:
-            - if: not ppc64le and not (target_platform == "osx-arm64" and build_platform != target_platform)
+            - if: not ppc64le and not ("osx" in target_platform and build_platform != target_platform)
               then:
                 - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
@@ -434,7 +434,7 @@ outputs:
         # Need zig to compile .exe shims on non-Unix (cross-compiler shim)
         - if: is_cross_compiler and not unix
           then:
-            - zig_impl_${{ xc_build_platform }} >=${{ version }}
+            - zig_impl_${{ xc_build_platform }} >=0.15.2,<=${{ version }}
       host:
         - if: not is_cross_compiler
           then:
@@ -444,7 +444,7 @@ outputs:
         # For cross-compiler: depend on zig_impl for BUILD platform (external package)
         - if: is_cross_compiler
           then:
-            - zig_impl_${{ xc_build_platform }} >=${{ version }}
+            - zig_impl_${{ xc_build_platform }} >=0.15.2,<=${{ version }}
           else:
             - ${{ pin_subpackage("zig_impl_" ~ cross_target_platform_, exact=True) }}
         - if: cross_target_platform_ == "linux-ppc64le"
