@@ -11,7 +11,7 @@ jobs:
       win_64_cross_target_platform_win-32:
         CONFIG: win_64_cross_target_platform_win-32
         UPLOAD_PACKAGES: 'True'
-        build_workspace_dir: C:/bld
+        build_workspace_dir: C:\bld
         free_disk_space: quick
         pagefile_size: 8
         resize_partitions: false
@@ -20,7 +20,7 @@ jobs:
       win_64_cross_target_platform_win-64:
         CONFIG: win_64_cross_target_platform_win-64
         UPLOAD_PACKAGES: 'True'
-        build_workspace_dir: C:/bld
+        build_workspace_dir: C:\bld
         free_disk_space: quick
         pagefile_size: 8
         resize_partitions: false
@@ -29,7 +29,7 @@ jobs:
       win_64_cross_target_platform_win-arm64:
         CONFIG: win_64_cross_target_platform_win-arm64
         UPLOAD_PACKAGES: 'True'
-        build_workspace_dir: C:/bld
+        build_workspace_dir: C:\bld
         free_disk_space: quick
         pagefile_size: 8
         resize_partitions: false

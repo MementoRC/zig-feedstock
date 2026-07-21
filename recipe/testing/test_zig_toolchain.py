@@ -1005,8 +1005,12 @@ def test_flag_filter_content() -> None:
         ("-mtune=* in filter list", "-mtune="),
         ("exported_symbols_list filtered", "exported_symbols_list"),
         ("unexported_symbols_list filtered", "unexported_symbols_list"),
-        ("force_symbols_not_weak_list filtered", "force_symbols_not_weak_list"),
-        ("force_symbols_weak_list filtered", "force_symbols_weak_list"),
+        # NOTE: force_symbols_not_weak_list / force_symbols_weak_list are
+        # deliberately no longer filtered or LLD-promoted (PR#123, 6f0c42e9):
+        # zig's machoLink() never forwards these flags anyway, so they now
+        # pass through untouched to the default macOS linker. The wrapper
+        # only documents them via the "-force_symbols_*_list" shorthand in
+        # a NOTE comment, so no literal substring check applies here.
         ("reexported_symbols_list filtered", "reexported_symbols_list"),
         ("-Wl,-all_load filtered", "all_load"),
         ("-Wl,-force_load filtered", "force_load"),
