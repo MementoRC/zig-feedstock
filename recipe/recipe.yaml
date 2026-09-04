@@ -16,7 +16,7 @@ context:
   bootstrap_via_upstream: false
 
   # Single switch; export derives from this. TEMPORARY "1" skips ~2h langref -- revert to "0" before merge.
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="1") == "1" }}
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" }}
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   skip_long_xbuild: ${{ env.get("SKIP_LONG_XBUILD", default="0") == "1" }}
@@ -456,7 +456,7 @@ outputs:
                 - libcxx
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
         files:
           recipe:
             - testing/_test_utils.py
@@ -480,8 +480,8 @@ outputs:
           run:
             - if: linux
               then:
-                - sysroot_${{ target_platform }}
                 - binutils_impl_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
         files:
           recipe:
             - testing/_test_utils.py
@@ -514,7 +514,7 @@ outputs:
           run:
             - if: linux
               then:
-                - sysroot_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
         files:
           source:
             - zig-source/test/behavior.zig
@@ -522,41 +522,56 @@ outputs:
 
       # Verify zig cc compile+run works (MSYS2 UCRT DLL resolution on Windows)
       - script:
+          interpreter: bash
+          content:
           - if: not unix
             then:
-              - echo int main(void){return 0;} > %TEMP%\test_run.c
-              - ${{ conda_triplet }}-zig cc -mconsole -o %TEMP%\test_run.exe %TEMP%\test_run.c
-              - '%TEMP%\test_run.exe'
-              - echo PASS zig cc compile+run (UCRT DLL resolution)
+                - t="$(mktemp -d)"
+                - trap 'rm -rf "$t"' EXIT
+                - printf 'int main(void){return 0;}\n' > "$t/test_run.c"
+                - ${{ conda_triplet }}-zig cc -mconsole -o "$t/test_run.exe" "$t/test_run.c"
+                - "$t/test_run.exe"
+                - echo "PASS zig cc compile+run (UCRT DLL resolution)"
+        requirements:
+          build:
+            - if: not unix
+              then:
+                - ${{ m2 }}bash >=5.2
 
       # Verify -fuse-ld=lld patch: zig cc must honor -fuse-ld=lld and pass
       # unrecognized linker args to LLD instead of rejecting them (Linux/ELF + NonUnix/COFF, not macOS/Mach-O).
       - script:
           interpreter: bash
           content:
-            - if: is_testable and not ppc64le
+            - export ZIG_GLOBAL_CACHE_DIR="${HOME:-${TMPDIR:-/tmp}}/.local/share/zig/zig-cache"
+            - t="$(mktemp -d)"
+            - trap 'rm -rf "$t"' EXIT
+            - printf 'int main(void){return 0;}\n' > "$t/test_lld.c"
+            - if: linux and not ppc64le
               then:
-                - export ZIG_GLOBAL_CACHE_DIR="${HOME:-${TMPDIR:-/tmp}}/.local/share/zig/zig-cache"
+                # Linux: test with ELF --dynamic-list
                 - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
                 - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
                 - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
-                - _zig="${PREFIX}"/${{ library }}bin/${{ conda_triplet }}"-zig"${{ exe }}
-                - echo 'int main(void){return 0;}' > /tmp/test_lld.c
-                - if: osx
-                  then:
-                    - echo '_main' > /tmp/test_lld.exp
-                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -Wl,-exported_symbols_list,/tmp/test_lld.exp -o /tmp/test_lld /tmp/test_lld.c
-                    - echo "PASS -fuse-ld=lld with -exported_symbols_list (macOS/Mach-O via LLD)"
-                - if: linux
-                  then:
-                    - echo '{ main; };' > /tmp/test_lld.dyn
-                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" cc -Wno-unused-command-line-argument -fuse-ld=lld -Wl,--dynamic-list=/tmp/test_lld.dyn -o /tmp/test_lld /tmp/test_lld.c
+                - _zig="${PREFIX}/bin/${{ conda_triplet }}-zig"
+                - printf '{ main; };\n' > "$t/test_lld.dyn"
+                - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" cc -Wno-unused-command-line-argument -fuse-ld=lld -Wl,--dynamic-list="$t/test_lld.dyn" -o "$t/test_lld" "$t/test_lld.c"
                     - echo "PASS -fuse-ld=lld with --dynamic-list (Linux/ELF)"
                 - if: not unix
                   then:
-                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -mconsole -o /tmp/test_lld.exe /tmp/test_lld.c && /tmp/test_lld.exe
+                # NonUnix: test with COFF -- verify -fuse-ld=lld compiles+links+runs
+                # Running the binary validates MSYS2 UCRT DLL resolution (api-ms-win-crt-*)
+                - ${{ conda_triplet }}-zig cc -fuse-ld=lld -mconsole -o "$t/test_lld.exe" "$t/test_lld.c"
+                - "$t/test_lld.exe"
                     - echo "PASS -fuse-ld=lld compile+link+run (NonUnix/COFF)"
-              else:
+            - if: osx and (is_native or is_rosetta)
+              then:
+                # macOS: test with Mach-O -exported_symbols_list via LLD
+                - printf '_main\n' > "$t/test_lld.exp"
+                - ${{ conda_triplet }}-zig cc -fuse-ld=lld -Wl,-exported_symbols_list,"$t/test_lld.exp" -o "$t/test_lld" "$t/test_lld.c"
+                - echo "PASS -fuse-ld=lld with -exported_symbols_list (macOS/Mach-O via LLD)"
+            - if: ppc64le and linux
+              then:
                 # LLD lacks ppc64le relocation support; wrapper guard tested via
                 # test_zig_toolchain.py (activation package). Raw binary has no wrapper.
                 - echo "Skip -fuse-ld=lld test on ppc64le (no wrapper in zig_impl_)"
@@ -569,7 +584,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
 
       # Verify x86_64-windows-gnu CRT bootstrap: real mingw32 archives in lib-common
       # presence/size for all three targets is asserted inside _mingw.sh itself.
@@ -620,9 +635,9 @@ outputs:
             - zig_impl_${{ build_platform }}${{ zig_impl_pin }}
             - if: ppc64le
               then:
+                - ${{ stdlib('c') }}
                 - binutils_impl_${{ cross_target_platform_ }} >=2.45
                 - gcc_impl_${{ cross_target_platform_ }} >=14.3
-                - sysroot_${{ target_platform }} ${{ _c_v }}.*
       host:
         - if: not (is_cross_compiler or is_cross_target)
           then:
@@ -686,42 +701,42 @@ outputs:
             - etc/conda/test-files/zig*
 
       - script:
+          interpreter: bash
+          content:
           # Verify CONDA_ZIG_BUILD and CONDA_ZIG_HOST are set by activation
-          - if: unix
-            then:
               - test -n "$CONDA_ZIG_BUILD"
               - test -n "$CONDA_ZIG_HOST"
               - echo "CONDA_ZIG_BUILD=$CONDA_ZIG_BUILD"
               - echo "CONDA_ZIG_HOST=$CONDA_ZIG_HOST"
               - test "$CONDA_ZIG_HOST" = "${{ conda_triplet }}-zig"
-            else:
-              - if not defined CONDA_ZIG_BUILD exit /b 1
-              - if not defined CONDA_ZIG_HOST exit /b 1
-              - echo CONDA_ZIG_BUILD=%CONDA_ZIG_BUILD%
-              - echo CONDA_ZIG_HOST=%CONDA_ZIG_HOST%
           # Wrapper + functional validation tests (Python, cross-platform)
           - if: linux
             then:
               - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
               - export QEMU_LD_PREFIX="${PREFIX}/${{ conda_triplet }}/sysroot"
               - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
-          - ${{ "export" if unix else "set" }} PYTHONIOENCODING=utf-8 && python testing/test_zig_toolchain.py
+            - export PYTHONIOENCODING=utf-8 && python testing/test_zig_toolchain.py
           # the cc wrapper must filter them before forwarding to zig cc.
           - if: not unix
             then:
               - if: is_cross_compiler
                 then:
-                  - set "CONDA_TRIPLET=${{ conda_triplet }}" && testing\test-cross-shim.bat
-              - echo void f(void){} > %TEMP%\test_manifest.c
-              - ${{ conda_triplet }}-zig-cc -shared -fuse-ld=lld /MANIFEST:NO /MANIFESTUAC:NO -o %TEMP%\test_manifest.dll %TEMP%\test_manifest.c
-              - if not exist %TEMP%\test_manifest.dll exit /b 1
-              - echo PASS zig cc /MANIFEST* filter
+                    - CONDA_TRIPLET="${{ conda_triplet }}" testing/test-cross-shim.bat
+                - t="$(mktemp -d)"
+                - trap 'rm -rf "$t"' EXIT
+                - printf 'void f(void){}\n' > "$t/test_manifest.c"
+                - MSYS2_ARG_CONV_EXCL='/MANIFEST' ${{ conda_triplet }}-zig-cc -shared -fuse-ld=lld /MANIFEST:NO /MANIFESTUAC:NO -o "$t/test_manifest.dll" "$t/test_manifest.c"
+                - test -f "$t/test_manifest.dll"
+                - echo "PASS zig cc /MANIFEST* filter"
         requirements:
           build:
             - python >=3.10
             - if: build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
+            - if: not unix
+              then:
+                - ${{ m2 }}bash >=5.2
           run:
             - if: (build_platform != target_platform) and linux
               then:
@@ -766,6 +781,7 @@ outputs:
         requirements:
           build:
             - python >=3.10
+
       # Golden/characterization parity tests for the zig-cc wrapper flag
       - script:
           - python testing/test_flag_translation_parity.py
@@ -838,7 +854,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
 
   # ==========================================================================
   # TOOLCHAIN META-PACKAGE: zig-compiler (toolchain metapackage)
@@ -878,7 +894,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }}
+                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
 
 about:
   homepage: https://ziglang.org/
