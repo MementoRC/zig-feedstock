@@ -81,6 +81,39 @@ build_native_llvm_config() {
     )
   fi
 
+  # osx only: this minimal native config never runs LLVM's own HandleLLVMOptions,
+  # which is what normally auto-detects and adds -stdlib=libc++ for the full TARGET
+  # build. _cmake_flags.sh also blanks CXXFLAGS for every lane, so nothing here tells
+  # the compiler which C++ standard library to use, and zig's bundled libc++ headers
+  # get half-applied - <cstring> pulls in <string.h> but can't find libc++'s own
+  # <string.h>, failing partway through the self-built llvm-min-tblgen (PR #175,
+  # osx-64 native). Linux cross does not hit this: it resolves the C++ stdlib via an
+  # explicit -lc++ link (CMAKE_CXX_STANDARD_LIBRARIES in _cmake_flags.sh) rather than
+  # header auto-detection, and native linux never reaches this function at all
+  # (guarded by `is_cross || is_osx` above) - so this flag is gated to osx only.
+  # NOTE: must be CMAKE_CXX_FLAGS (the live cache variable), not CMAKE_CXX_FLAGS_INIT
+  # (round 1, PR #175 commit a3a28f2f still failed identically). _INIT is only a seed
+  # for the toolchain-file stage; once llvm/CMakeLists.txt calls enable_language(CXX)
+  # and HandleLLVMOptions explicitly sets CMAKE_CXX_FLAGS, the _INIT seed is shadowed
+  # and never reaches the generated ninja compile rules. Do not "simplify" this back
+  # to _INIT - it silently does nothing.
+  # Round 3 (build 1583154, log #33, PR #175): -stdlib=libc++ alone still failed with
+  # "<cerrno> tried including <errno.h> but didn't find libc++'s <errno.h>". This is a
+  # HEADER SEARCH ORDER fault, not a stdlib-selection fault: the Apple SDK's stdlib.h
+  # `abs(int) __pure2` collides with libcxx/include/cmath's `using ::abs`, and the SDK
+  # sysroot's C headers are being found ahead of zig's own bundled libc++ headers.
+  # Fix attempt: add an explicit -isystem for zig's bundled libcxx include dir into the
+  # same live CMAKE_CXX_FLAGS value, so it is searched before the SDK sysroot's headers.
+  # A paired -E -v diagnostic dump is added right before the cmake -S call below to show
+  # the actual resulting search order (duplicate vs SDK-first vs zig-first) if this still
+  # fails.
+  local _native_cfg_stdlib=()
+  local _native_cxx_flags=""
+  if is_osx; then
+    _native_cxx_flags="-stdlib=libc++ -isystem ${BUILD_PREFIX}/lib/zig/libcxx/include"
+    _native_cfg_stdlib=(-DCMAKE_CXX_FLAGS="${_native_cxx_flags}")
+  fi
+
   # zlib/zstd/xml2 OFF: the conda copies in BUILD_PREFIX are TARGET-arch and cannot
   # link into a host binary; build-zig.sh already appends -lzstd -lxml2 -lz for the
   # target link. Same backend list as the target build so --components/--libnames match.
@@ -102,11 +135,21 @@ build_native_llvm_config() {
   # flag here does NOT force building the LLVM dylib target itself — we still build
   # only `--target llvm-config` below — it only changes what the generated llvm-config
   # binary reports about its own (would-be) configuration.
+  if is_osx; then
+    echo "=== [DIAG round-3 osx-64] native c++ include search order ==="
+    # Intentionally unquoted: _native_cxx_flags must word-split into separate
+    # compiler args (-stdlib=libc++ -isystem <dir>), not be passed as one
+    # cmake-style -DCMAKE_CXX_FLAGS=... argument. Do not add quotes here.
+    "${_ncxx}" ${_native_cxx_flags} -isysroot "${CONDA_BUILD_SYSROOT}" -E -v -x c++ /dev/null 2>&1 | sed -n '/#include <...> search starts here/,/End of search list/p' || true
+    echo "=== [DIAG round-3 osx-64] end include search order ==="
+  fi
+
   cmake -S "${LLVM_SRC}" -B "${_nb}" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="${_ncc}" \
     -DCMAKE_CXX_COMPILER="${_ncxx}" \
     "${_native_cfg_target[@]}" \
+    "${_native_cfg_stdlib[@]}" \
     -DCMAKE_INSTALL_PREFIX="${_stage}" \
     -DCMAKE_INSTALL_INCLUDEDIR=include \
     -DCMAKE_INSTALL_LIBDIR=lib \

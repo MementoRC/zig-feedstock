@@ -108,7 +108,7 @@
      };
      result catch |err| switch (err) {
          error.OutOfMemory, error.LinkFailure => |e| return e,
-@@ -1609,6 +1640,182 @@
+@@ -1609,6 +1640,187 @@
      }
  }
 
@@ -178,6 +178,7 @@
 +        try argv.appendSlice(&.{ "-platform_version", "macos", ver_str, ver_str });
 +
 +        if (comp.sysroot) |sysroot| {
++            std.debug.print("[DIAG round-6 machoLink] sysroot=\"{s}\" len={d}\n", .{ sysroot, sysroot.len });
 +            try argv.appendSlice(&.{ "-syslibroot", sysroot });
 +        }
 +
@@ -235,13 +236,17 @@
 +            try argv.appendSlice(&.{ "-undefined", "dynamic_lookup" });
 +        }
 +
++        std.debug.print("[DIAG round-6 machoLink] link_inputs count={d}\n", .{comp.link_inputs.len});
 +        for (comp.link_inputs) |link_input| switch (link_input) {
 +            .object, .archive => |obj| {
 +                if (obj.must_link) try argv.append("-force_load");
 +                try argv.append(try obj.path.toString(arena));
 +            },
 +            .dso => continue,
-+            .dso_exact => |dso_exact| try argv.appendSlice(&.{ "-l", dso_exact.name }),
++            .dso_exact => |dso_exact| {
++                std.debug.print("[DIAG round-6 machoLink] dso_exact.name=\"{s}\" len={d}\n", .{ dso_exact.name, dso_exact.name.len });
++                try argv.appendSlice(&.{ "-l", dso_exact.name });
++            },
 +            .res => unreachable,
 +        };
 +
@@ -257,11 +262,11 @@
 +            .res => unreachable,
 +            .dso => |dso| {
 +                if (dso.needed) {
-+                    try argv.appendSlice(&.{ "-needed-l", try dso.path.toString(arena) });
++                    try argv.appendSlice(&.{ "-needed_library", try dso.path.toString(arena) });
 +                } else if (dso.weak) {
-+                    try argv.appendSlice(&.{ "-weak-l", try dso.path.toString(arena) });
++                    try argv.appendSlice(&.{ "-weak_library", try dso.path.toString(arena) });
 +                } else {
-+                    try argv.appendSlice(&.{ "-l", try dso.path.toString(arena) });
++                    try argv.append(try dso.path.toString(arena));
 +                }
 +            },
 +        };
@@ -304,7 +309,7 @@
  }
 --- a/src/codegen/llvm/bindings.zig
 +++ b/src/codegen/llvm/bindings.zig
-@@ -312,7 +312,9 @@
+@@ -312,10 +312,12 @@
  extern fn ZigLLDLinkCOFF(argc: c_int, argv: [*:null]const ?[*:0]const u8, can_exit_early: bool, disable_output: bool) bool;
  extern fn ZigLLDLinkELF(argc: c_int, argv: [*:null]const ?[*:0]const u8, can_exit_early: bool, disable_output: bool) bool;
  extern fn ZigLLDLinkWasm(argc: c_int, argv: [*:null]const ?[*:0]const u8, can_exit_early: bool, disable_output: bool) bool;
@@ -314,3 +319,6 @@
  pub const LinkELF = ZigLLDLinkELF;
  pub const LinkWasm = ZigLLDLinkWasm;
 +pub const LinkMachO = ZigLLDLinkMachO;
+
+ pub const ArchiveKind = enum(c_int) {
+     GNU,

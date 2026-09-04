@@ -100,8 +100,29 @@ if [[ "${CONDA_BUILD_CROSS_COMPILATION:-0}" == "1" ]]; then
     _native_asm="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cc"
     _native_osx_arch="arm64"
     [[ "${build_platform}" == "osx-64" ]] && _native_osx_arch="x86_64"
+    # Pin CMAKE_OSX_SYSROOT for the NATIVE sub-project too, same source of
+    # truth as the main-pass pin in _cmake_flags.sh (CONDA_BUILD_SYSROOT).
+    # Without this, CMake is free to auto-detect an SDK (e.g. via xcrun) for
+    # NATIVE's own configure, and an explicit -I into that auto-detected
+    # SDK's usr/include can shadow libc++'s <string.h> wrapper even with
+    # -stdlib=libc++ already on the line. Omit the entry entirely (rather
+    # than emit an empty -D) if the sysroot is unset or missing.
+    _native_sysroot_flag=""
+    if [[ -n "${CONDA_BUILD_SYSROOT:-}" && -d "${CONDA_BUILD_SYSROOT}/usr/lib" ]]; then
+      _native_sysroot_flag=";-DCMAKE_OSX_SYSROOT=${CONDA_BUILD_SYSROOT}"
+    fi
+    # CROSS_TOOLCHAIN_FLAGS_NATIVE is the ONLY channel into LLVM's nested NATIVE
+    # sub-project configure ($SRC_DIR/conda-llvm-build/NATIVE, its own cmake
+    # invocation driven by LLVM's CrossCompile.cmake). Flags set anywhere else
+    # in this recipe (including _native_llvm_config.sh, which targets a
+    # different, unrelated cmake invocation) never reach it. PR #175 osx-64
+    # CROSS lane: NATIVE inherits the zig-cxx wrapper's bundled libcxx headers
+    # ahead of the macOS SDK's <string.h> ("<cstring> tried including
+    # <string.h> but didn't find libc++'s <string.h> header"); force
+    # -stdlib=libc++ so clang's search-path ordering matches what the wrapper
+    # expects instead of falling through to the SDK's libstdc++-style headers.
     CMAKE_CROSS_FLAGS+=(
-      "-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=${_native_cc};-DCMAKE_CXX_COMPILER=${_native_cxx};-DCMAKE_ASM_COMPILER=${_native_asm};-DCMAKE_OSX_ARCHITECTURES=${_native_osx_arch};-DCMAKE_PREFIX_PATH=${BUILD_PREFIX};-DCMAKE_FIND_ROOT_PATH=${BUILD_PREFIX};-DLLVM_ENABLE_ZSTD=OFF"
+      "-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=${_native_cc};-DCMAKE_CXX_COMPILER=${_native_cxx};-DCMAKE_ASM_COMPILER=${_native_asm};-DCMAKE_OSX_ARCHITECTURES=${_native_osx_arch};-DCMAKE_PREFIX_PATH=${BUILD_PREFIX};-DCMAKE_FIND_ROOT_PATH=${BUILD_PREFIX};-DLLVM_ENABLE_ZSTD=OFF;-DCMAKE_CXX_FLAGS=-stdlib=libc++${_native_sysroot_flag}"
     )
   elif is_not_unix; then
     # Native host tools (llvm-min-tblgen.exe etc.) must run on the x86_64 win-64
@@ -209,6 +230,34 @@ NATIVE_CMINIT
     )
   fi
 
+fi
+
+# Native osx-64 lane (build_platform == target_platform): the guard above never
+# runs here, but LLVM's NATIVE llvm-min-tblgen sub-build still inherits the main
+# configure's zig-cc and picks up zig's bundled libcxx headers, not the SDK's
+# (PR #175, osx-64 NATIVE lane, Azure build 1582020: cmath/cstdlib errors).
+# Mirrors the is_osx CROSS_TOOLCHAIN_FLAGS_NATIVE branch above; precedent for
+# widening a NATIVE-tool override to this lane is _runtimes_build.sh:275
+# (`is_cross || is_osx`, same PR #123 llvm-min-tblgen gap).
+if is_osx && ! is_cross; then
+  _native_cc="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cc"
+  _native_cxx="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cxx"
+  _native_asm="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cc"
+  _native_osx_arch="arm64"
+  [[ "${build_platform}" == "osx-64" ]] && _native_osx_arch="x86_64"
+  # Same libc++ header-ordering issue as the is_cross branch above (PR #175,
+  # osx-64 NATIVE lane, Azure build 1582020): keep this flag in sync with the
+  # -DCMAKE_CXX_FLAGS=-stdlib=libc++ suffix at line 114.
+  # Same CMAKE_OSX_SYSROOT pin as the is_cross branch above, same guard and
+  # same source of truth (CONDA_BUILD_SYSROOT, matching _cmake_flags.sh).
+  _native_sysroot_flag=""
+  if [[ -n "${CONDA_BUILD_SYSROOT:-}" && -d "${CONDA_BUILD_SYSROOT}/usr/lib" ]]; then
+    _native_sysroot_flag=";-DCMAKE_OSX_SYSROOT=${CONDA_BUILD_SYSROOT}"
+  fi
+  CMAKE_CROSS_FLAGS+=(
+    "-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=${_native_cc};-DCMAKE_CXX_COMPILER=${_native_cxx};-DCMAKE_ASM_COMPILER=${_native_asm};-DCMAKE_OSX_ARCHITECTURES=${_native_osx_arch};-DCMAKE_PREFIX_PATH=${BUILD_PREFIX};-DCMAKE_FIND_ROOT_PATH=${BUILD_PREFIX};-DLLVM_ENABLE_ZSTD=OFF;-DCMAKE_CXX_FLAGS=-stdlib=libc++${_native_sysroot_flag}"
+  )
+  unset _native_cc _native_cxx _native_asm _native_osx_arch _native_sysroot_flag
 fi
 
 # ppc64le: zig's self-hosted linker looks for `cc` in PATH to use as the

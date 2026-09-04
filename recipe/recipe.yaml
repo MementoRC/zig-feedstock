@@ -48,9 +48,12 @@ context:
 
   # Zig target mapping https://github.com/ziglang/zig-bootstrap
   _c_v: ${{ c_stdlib_version | default("") }}
-  _zig_glibc: ${{ "2.27" if xc_riscv64 else _c_v }}
-  # Same 2.27 riscv64 floor as _zig_glibc, keyed on target_platform (not cross_target_platform_)
-  _zig_glibc_tgt: ${{ "2.27" if target_platform == "linux-riscv64" else _c_v }}
+  # riscv64 floor is 2.39, matching install_zig_activation.py:231
+  # (_SHIM_GLIBC_FLOOR_BY_ARCH).  2.27 is merely the earliest glibc with any
+  # riscv64 support; conda-forge riscv64 binaries import pthread_*@GLIBC_2.34.
+  _zig_glibc: ${{ "2.39" if xc_riscv64 else _c_v }}
+  # Same 2.39 riscv64 floor as _zig_glibc, keyed on target_platform (not cross_target_platform_)
+  _zig_glibc_tgt: ${{ "2.39" if target_platform == "linux-riscv64" else _c_v }}
   zig_triplet: >-
     ${{
       "x86_64-linux-gnu." ~ _zig_glibc        if xc_l64                              else
@@ -68,12 +71,15 @@ context:
   zig_short_triplet: ${{ zig_triplet | split(".") | first }}
 
   # Known conda-forge build_platforms (zig -target format, no glibc suffix)
+  # macOS branches need a trailing "-none" ABI segment: zig-cc-unix.c's
+  # deployment-target rewrite finds the ABI via the last "-" in the triple,
+  # so without it the OS field gets duplicated and zig rejects the target.
   zig_build_triplet: >-
     ${{
       "x86_64-linux-gnu"                     if build_platform == "linux-64"        else
       "aarch64-linux-gnu"                    if build_platform == "linux-aarch64"   else
-      "x86_64-macos." ~ _c_v                 if build_platform == "osx-64"          else
-      "aarch64-macos." ~ _c_v                if build_platform == "osx-arm64"       else
+      "x86_64-macos." ~ _c_v ~ "-none"       if build_platform == "osx-64"          else
+      "aarch64-macos." ~ _c_v ~ "-none"      if build_platform == "osx-arm64"       else
       "x86_64-windows-gnu"                   if build_platform == "win-64"          else
       "native"
     }}
@@ -268,6 +274,16 @@ source:
           # flexlink-merged __CTOR_LIST__ (no -1 head / no NULL terminator) cannot
           # run off the end (0xC00000FD STATUS_STACK_OVERFLOW pre-main).
           - patches/non_unix/gccmain-do-global-ctors-guard.patch
+          # win-64/arm64: recipe/zig-llvm/building/_native_llvm_config.sh prunes
+          # LLVM_TARGETS_TO_BUILD to a 7-backend subset (Azure 360-min budget on
+          # win-64, PE export-count limit on win-arm64), dropping AMDGPU, AVR,
+          # BPF and others. Relax zig's own required-target check for that
+          # pruned set, then guard the matching unbuilt-target init call sites
+          # in llvm.zig so they do not undefined-symbol-link on the backends
+          # neither windows lane builds. Order: cmake check first, then the
+          # zig-side init guard it makes possible.
+          - patches/non_unix/Findllvm.cmake-relax-required-targets-win.patch
+          - patches/non_unix/llvm.zig-guard-unbuilt-target-init-win.patch
     target_directory: zig-source
 
   - if: bootstrap_via_upstream
@@ -335,6 +351,7 @@ source:
 
 build:
   number: ${{ build_number }}
+  string: ${{ hash }}_experimental_${{ build_number }}
 
 outputs:
   # ==========================================================================
@@ -465,7 +482,8 @@ outputs:
                 - zig-lld-bundle
           files:
             # qemu-ppc64le doesn't faithfully emulate traps
-            - if: (is_native or (linux and not xc_ppc64le)) and not skip_langref
+            # See recipe/build.sh:1162: _can_run_stage3 skips phase 2 langref for riscv64
+            - if: (is_native or (linux and not xc_ppc64le)) and not skip_langref and not xc_riscv64
               then:
                 - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
@@ -504,6 +522,8 @@ outputs:
             then:
               - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
               - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
+              - export LD_LIBRARY_PATH="${PREFIX}/lib/zig-llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              - echo "[DIAG round-6 aarch64-libcxx] PREFIX=${PREFIX} ; ls:" && ls -l "${PREFIX}/lib/zig-llvm/lib/libc++.so.1" || true
           - ${{ "PYTHONIOENCODING=utf-8" if unix else "set PYTHONIOENCODING=utf-8 &&" }} python testing/test_libcxx_shared.py ${{ conda_triplet }} ${{ zig_triplet }}
         requirements:
           build:
@@ -541,6 +561,7 @@ outputs:
                 - binutils_impl_${{ target_platform }}
         files:
           recipe:
+            - testing/_test_utils.py
             - testing/test_dtneeded.py
       # Functional test using triplet-prefixed binary
       - script:

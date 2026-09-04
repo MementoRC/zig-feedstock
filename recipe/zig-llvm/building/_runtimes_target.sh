@@ -28,6 +28,43 @@ if is_linux; then
   export LD_LIBRARY_PATH="${BUILD_PREFIX}/lib/zig-llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
+# macOS native lane: pin CMAKE_OSX_SYSROOT to CONDA_BUILD_SYSROOT so this
+# pass's cmake-auto-derived -isysroot agrees with the main LLVM build pass
+# (see _cmake_flags.sh's native-osx CMAKE_OSX_SYSROOT pin -- same source
+# variable, same guard). Round-5 CI evidence (PR #175, osx-arm64) showed this
+# pass configuring with CMAKE_OSX_SYSROOT unset, so cmake auto-detected an
+# Xcode SDK while the main LLVM pass used the pinned MacOSX11.0.sdk -- an SDK
+# mismatch across sub-builds. Native-only, mirroring _cmake_flags.sh: cmake
+# does not auto-populate CMAKE_OSX_SYSROOT on cross builds, so the two cross
+# lanes already get a single consistent (CONDA_BUILD_SYSROOT) sysroot without
+# this pin and must not be widened into it. Omit the flag entirely (rather
+# than emit an empty value) if CONDA_BUILD_SYSROOT is unset or missing its
+# usr/lib.
+if is_osx && ! is_cross; then
+  if [[ -n "${CONDA_BUILD_SYSROOT:-}" && -d "${CONDA_BUILD_SYSROOT}/usr/lib" ]]; then
+    _RUNTIMES_CMAKE+=(
+      -DCMAKE_OSX_SYSROOT="${CONDA_BUILD_SYSROOT}"
+    )
+  fi
+fi
+
+# [diag] osx-arm64 native lane H1/H2 investigation: confirm whether the pin
+# above actually took effect for this main (target-arch) runtimes pass.
+if is_osx; then
+  _diag_osx_sysroot="<not set in _RUNTIMES_CMAKE>"
+  for _f in "${_RUNTIMES_CMAKE[@]}"; do
+    [[ "${_f}" == -DCMAKE_OSX_SYSROOT=* ]] && _diag_osx_sysroot="${_f#-DCMAKE_OSX_SYSROOT=}"
+  done
+  echo "[diag] main runtimes cmake configure: CMAKE_OSX_SYSROOT=${_diag_osx_sysroot}"
+  echo "[diag] main runtimes cmake configure: CONDA_BUILD_SYSROOT=${CONDA_BUILD_SYSROOT:-<unset>}"
+  if ! is_cross; then
+    echo "[diag] main runtimes cmake configure: -isysroot now derives from the pinned CMAKE_OSX_SYSROOT above; no explicit --sysroot linker flag is injected by this script for this pass"
+  else
+    echo "[diag] main runtimes cmake configure: cross lane, no CMAKE_OSX_SYSROOT pin applied (cmake does not auto-populate it on cross); no explicit --sysroot linker flag is injected by this script for this pass"
+  fi
+  unset _diag_osx_sysroot _f
+fi
+
 # Configure and build LLVM runtimes.
 cmake -S "${LIBCXX_SRC}" -B "${SRC_DIR}/conda-runtimes-build" \
   "${_RUNTIMES_CMAKE[@]}" \

@@ -89,10 +89,46 @@ if is_osx; then
   )
 
   # macOS: zig 0.15.2 build 27 rejects -Wl,-syslibroot outright (unsupported linker arg).
-  # Rely on compiler-driven -isysroot instead (cmake sets it via CMAKE_OSX_SYSROOT).
-  # If '-lSystem not found' resurfaces, use a zig-native --sysroot flag, not -syslibroot.
+  # Use a zig-native --sysroot flag instead, not -syslibroot.
+  #
+  # -isysroot (set by CMake via CMAKE_OSX_SYSROOT) only steers the COMPILER
+  # frontend's header/default-library search at compile time. It does NOT
+  # drive ld64.lld's separate implicit-default-library resolution at link
+  # time - that needs its own syslibroot, which is what zig-native --sysroot
+  # supplies here. So --sysroot is required on osx regardless of native/cross.
+  #
+  # Round-1/round-2 regression (corrected here): the actual defect was never
+  # "two sysroots reaching the linker" - it was two DIFFERENT sysroots on the
+  # two sides of the build. On true-native osx (build_platform ==
+  # target_platform, i.e. NOT is_cross), CMake auto-detects the SDK itself and
+  # sets CMAKE_OSX_SYSROOT/-isysroot to whatever Xcode has installed (e.g.
+  # Xcode 16.4's SDK), while --sysroot here pointed at CONDA_BUILD_SYSROOT
+  # (the pinned MacOSX11.0.sdk from setup_macos_sysroot). Compiling against
+  # one SDK and linking against another produced 3x "ld64.lld: error: library
+  # not found for -l" (empty -l) at the final libLLVM.dylib link. Dropping
+  # --sysroot on native (round 1's fix) left -isysroot as the only sysroot but
+  # did NOT fix the failure, confirming -isysroot alone cannot satisfy
+  # ld64.lld. Cross osx lanes were never affected: CMake does not
+  # auto-populate CMAKE_OSX_SYSROOT on cross builds, so CONDA_BUILD_SYSROOT
+  # was already the only sysroot on both sides there.
+  #
+  # Fix: on native osx, pin CMAKE_OSX_SYSROOT to the SAME CONDA_BUILD_SYSROOT
+  # so -isysroot and --sysroot agree; then add --sysroot for osx
+  # unconditionally (native and cross). Cross keeps getting exactly the two
+  # linker-flags it got before - only native gains the extra CMAKE_OSX_SYSROOT
+  # pin plus the linker flags it was previously missing.
   if [[ -n "${CONDA_BUILD_SYSROOT:-}" && -d "${CONDA_BUILD_SYSROOT}/usr/lib" ]]; then
-    dbg "macOS sysroot: relying on -isysroot/CMAKE_OSX_SYSROOT (${CONDA_BUILD_SYSROOT})"
+    if ! is_cross; then
+      dbg "macOS sysroot: pinning CMAKE_OSX_SYSROOT=${CONDA_BUILD_SYSROOT} so -isysroot matches --sysroot"
+      CMAKE_PLATFORM_FLAGS+=(
+        -DCMAKE_OSX_SYSROOT="${CONDA_BUILD_SYSROOT}"
+      )
+    fi
+    dbg "macOS sysroot: adding zig-native --sysroot=${CONDA_BUILD_SYSROOT}"
+    CMAKE_PLATFORM_FLAGS+=(
+      -DCMAKE_EXE_LINKER_FLAGS_INIT="--sysroot=${CONDA_BUILD_SYSROOT}"
+      -DCMAKE_SHARED_LINKER_FLAGS_INIT="--sysroot=${CONDA_BUILD_SYSROOT}"
+    )
   else
     echo "  WARNING: CONDA_BUILD_SYSROOT not set or has no usr/lib — link may fail with 'library not found for -lSystem'"
   fi

@@ -811,10 +811,182 @@ elif is_osx; then
   # probe dir (${LLVM_INSTALL}/lib is TARGET-arch); native: probe dir is the same arch.
   export DYLD_LIBRARY_PATH="${BUILD_PREFIX}/lib/zig-llvm/lib:${LLVM_INSTALL}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
   echo "  Phase 1: Building LLVM shared library..."
+  # --- CROSS_TOOLCHAIN_FLAGS_NATIVE diagnostic (PR #175 osx-64 NATIVE lane) ---
+  # Three prior CI rounds believed the -stdlib=libc++ suffix reached the NATIVE
+  # sub-project configure when it had actually landed in an adjacent branch
+  # each time. Print the resolved flag before the build, then check what the
+  # NATIVE sub-project's own cmake cache actually recorded, so a red round is
+  # confirmed instead of guessed.
+  _cross_toolchain_native_flag=""
+  for _f in "${CMAKE_CROSS_FLAGS[@]}"; do
+    [[ "${_f}" == -DCROSS_TOOLCHAIN_FLAGS_NATIVE=* ]] && _cross_toolchain_native_flag="${_f}"
+  done
+  echo "[diag] CROSS_TOOLCHAIN_FLAGS_NATIVE (Phase 1, osx): ${_cross_toolchain_native_flag:-<not set>}"
+
+  # --- H1/H2 diagnostic: embedded autolink (LC_LINKER_OPTION) probe ---------
+  # osx-arm64 native lane fails the libLLVM.dylib link with 3x "ld64.lld:
+  # error: library not found for -l" (empty argument), while the ninja-visible
+  # driver command has exactly one literal -l flag (-lm). H1 suspects these
+  # come from LC_LINKER_OPTION autolink records embedded in an input .a/.o
+  # (most likely lib/libc++.1.0.dylib, built without the sysroot pin _cmake_
+  # flags.sh applies to the main LLVM pass -- see the [diag] sysroot echoes in
+  # _runtimes_build.sh / _runtimes_target.sh). Dump embedded autolink records
+  # here, before the link is attempted, so a passing lane gives a baseline to
+  # diff a failing one against. Non-fatal, output capped, never changes the
+  # link itself.
+  echo "[diag] autolink probe (osx, pre-link): scanning inputs for LC_LINKER_OPTION records"
+  _diag_libcxx_dylib=$(find "${LLVM_INSTALL}/lib" "${BUILD_PREFIX}/lib/zig-llvm/lib" -maxdepth 1 -name 'libc++.1.0.dylib' 2>/dev/null | awk 'NR==1')
+  if [[ -n "${_diag_libcxx_dylib}" && -f "${_diag_libcxx_dylib}" ]]; then
+    echo "[diag] autolink probe: otool -l ${_diag_libcxx_dylib} | grep -A2 LC_LINKER_OPTION"
+    otool -l "${_diag_libcxx_dylib}" 2>/dev/null | grep -A2 LC_LINKER_OPTION | head -n 60 || \
+      echo "[diag] autolink probe: no LC_LINKER_OPTION records found in ${_diag_libcxx_dylib}"
+  else
+    echo "[diag] autolink probe: libc++.1.0.dylib not found under ${LLVM_INSTALL}/lib or ${BUILD_PREFIX}/lib/zig-llvm/lib -- skipping"
+  fi
+  unset _diag_libcxx_dylib
+
   set +e
   cmake --build "${LLVM_BUILD}" --target LLVM -j"${CPU_COUNT}"
   _phase1_rc=$?
   set -e
+
+  # --- H1/H2 diagnostic continued: libLLVM*.a archive scan ------------------
+  # Placement is deliberate: this sits ON THE FAILURE PATH of the Phase 1
+  # cmake --build above, i.e. AFTER _phase1_rc is captured and set -e is
+  # restored, but BEFORE the rc-based `exit ${_phase1_rc}` further down in
+  # this branch. The failing libLLVM.dylib link IS Phase 1's terminal ninja
+  # step, so any probe sequenced only after a successful Phase 1 would be
+  # unreachable on exactly the failure it exists to diagnose. Executing here,
+  # keyed off the already-captured rc rather than a fresh cmake --build call,
+  # guarantees it runs whether Phase 1 passed or failed -- ninja has already
+  # built every archive this link depends on by the time the link itself is
+  # attempted, so the archives exist on disk in both cases. A passing lane
+  # still runs the scan (cheap) so it leaves a baseline to diff a future
+  # failing lane against. Scans the ACTUAL libLLVM*.a archives that feed the
+  # libLLVM.dylib link (not libc++.1.0.dylib, which is not a link input here).
+  # Bounded to 40 archives / 6 lines per hit, non-fatal.
+  if [[ ${_phase1_rc} -ne 0 ]]; then
+    echo "[diag] autolink probe (osx, post-link, FAILURE path rc=${_phase1_rc}): scanning libLLVM*.a archives that feed the failed libLLVM.dylib link"
+  else
+    echo "[diag] autolink probe (osx, post-link, success path): scanning libLLVM*.a archives as a baseline"
+  fi
+  _diag_archive_hits=0
+  _diag_archive_checked=0
+  while IFS= read -r _diag_archive; do
+    [[ -f "${_diag_archive}" ]] || continue
+    _diag_archive_checked=$((_diag_archive_checked + 1))
+    # LC_LINKER_OPTION count() field of 0, or a record whose string payload is
+    # empty, is what would surface later as a bare "-l" with no argument.
+    _diag_lo_block=$(otool -l "${_diag_archive}" 2>/dev/null | grep -A2 LC_LINKER_OPTION || true)
+    if [[ -n "${_diag_lo_block}" ]]; then
+      _diag_archive_hits=$((_diag_archive_hits + 1))
+      echo "[diag] autolink probe: LC_LINKER_OPTION found in ${_diag_archive}"
+      echo "${_diag_lo_block}" | head -n 6
+    fi
+  done < <(find "${LLVM_BUILD}" -maxdepth 2 -name 'libLLVM*.a' 2>/dev/null | head -n 40)
+  # PROBE-EXECUTED marker: an empty result (checked=N hits=0) must be
+  # distinguishable in the log from the probe never having run at all.
+  echo "[diag] autolink probe: PROBE-EXECUTED checked=${_diag_archive_checked} hits=${_diag_archive_hits} phase1_rc=${_phase1_rc}"
+  unset _diag_archive_hits _diag_archive_checked _diag_archive _diag_lo_block
+
+  # Cheap either way (pass or fail): a passing lane gives a baseline to diff a
+  # future red one against. Guard the file check so a missing cache never
+  # errors under set -e (grep -c returns 1 on zero matches).
+  _native_cmake_cache="${LLVM_BUILD}/NATIVE/CMakeCache.txt"
+  if [[ -f "${_native_cmake_cache}" ]]; then
+    _native_libcxx_count=$(grep -c 'stdlib=libc++' "${_native_cmake_cache}" 2>/dev/null || echo 0)
+    echo "[diag] NATIVE CMakeCache.txt stdlib=libc++ occurrences: ${_native_libcxx_count}"
+    # CMAKE_OSX_SYSROOT / CMAKE_SYSROOT / CMAKE_CXX_FLAGS probe: settles whether
+    # the NATIVE sub-project's own cmake configure recorded a sysroot pin (from
+    # the CROSS_TOOLCHAIN_FLAGS_NATIVE fix above) or left it auto-detected.
+    # Guarded with `|| true` -- grep exits 1 on zero matches, which under
+    # set -e would otherwise abort the script and erase this round's diagnostics.
+    echo "[diag] NATIVE CMakeCache.txt sysroot/flags entries:"
+    grep -E '^(CMAKE_OSX_SYSROOT|CMAKE_SYSROOT|CMAKE_CXX_FLAGS):' "${_native_cmake_cache}" 2>/dev/null | head -n 10 || \
+      echo "[diag]   (none of CMAKE_OSX_SYSROOT/CMAKE_SYSROOT/CMAKE_CXX_FLAGS found in cache)"
+  else
+    echo "[diag] NATIVE CMakeCache.txt not found at ${_native_cmake_cache}"
+  fi
+
+  # Full compile command for one NATIVE object (llvm-min-tblgen): the single
+  # line that answers whether the failing -I into the SDK's usr/include is
+  # redundant with an -isysroot CMake already set, or is a second, independent
+  # injection pointing somewhere else. Prefer compile_commands.json; fall back
+  # to 'ninja -t commands'. Every substitution below is `|| true`-guarded so a
+  # missing file or a failing ninja/grep invocation cannot trip set -e.
+  _native_build_dir="${LLVM_BUILD}/NATIVE"
+  if [[ -d "${_native_build_dir}" ]]; then
+    _native_compdb="${_native_build_dir}/compile_commands.json"
+    _native_compile_cmd=""
+    if [[ -f "${_native_compdb}" ]]; then
+      _native_compile_cmd=$(grep -m1 '"command"' "${_native_compdb}" 2>/dev/null || true)
+    fi
+    if [[ -z "${_native_compile_cmd}" ]]; then
+      _native_compile_cmd=$(ninja -C "${_native_build_dir}" -t commands llvm-min-tblgen 2>/dev/null | head -n 1 || true)
+    fi
+    if [[ -n "${_native_compile_cmd}" ]]; then
+      echo "[diag] NATIVE compile command (first object, capped to 4000 chars):"
+      echo "${_native_compile_cmd}" | head -c 4000
+      echo
+      _native_has_isysroot=$(echo "${_native_compile_cmd}" | grep -o -- '-isysroot [^ "]*' | head -n 1 || true)
+      _native_has_dash_i=$(echo "${_native_compile_cmd}" | grep -o -- '-I[^ "]*usr/include[^ "]*' | head -n 1 || true)
+      echo "[diag] NATIVE compile command -isysroot: ${_native_has_isysroot:-<none>}"
+      echo "[diag] NATIVE compile command -I usr/include: ${_native_has_dash_i:-<none>}"
+      unset _native_has_isysroot _native_has_dash_i
+    else
+      echo "[diag] NATIVE compile command: could not obtain from compile_commands.json or 'ninja -t commands' -- skipping"
+    fi
+    unset _native_compdb _native_compile_cmd
+  else
+    echo "[diag] NATIVE build dir not found at ${_native_build_dir} -- skipping compile-command probe"
+  fi
+  unset _native_build_dir
+  unset _cross_toolchain_native_flag _f _native_cmake_cache _native_libcxx_count
+
+  # --- H2 diagnostic: real LLD argv via zig's --verbose-link. ---------------
+  # Previously gated behind DEBUG_ZIG_BUILD, matching the recipe-wide switch
+  # documented at the top of recipe/build.sh. Confirmed (recipe/recipe.yaml
+  # DEBUG_ZIG_BUILD default is "0", and no CI workflow in this repo exports
+  # it) that DEBUG_ZIG_BUILD is NEVER set on CI lanes -- that gate made this
+  # probe permanently dead weight on exactly the failing lane it exists to
+  # diagnose. Unconditional now; still fully guarded (set +e/set -e around
+  # the side probe, `|| true` on the capture) and non-fatal, and it only
+  # re-runs an already-captured link command as a side probe, so it cannot
+  # change build state or exit status either way. -----------------------
+  # recipe/patches/Lld.zig-macho-lld-support.patch builds the LLD argv
+  # INTERNALLY inside machoLink() -- a bad entry there (e.g. an empty
+  # dso_exact.name producing a bare {"-l", ""} pair) would never appear in the
+  # ninja-visible driver command line. zig's own Compilation.verbose_link ->
+  # dumpArgv() is the only way to see that internal argv without patching
+  # Lld.zig-macho-lld-support.patch (out of scope for this diagnostic).
+  #
+  # zig's --verbose-link is documented elsewhere in this feedstock
+  # (recipe/testing/test_zig_toolchain.py) as REJECTED by zig's clang-driver
+  # (cc/c++) mode ("Unknown Clang option: '--verbose-link'"), which is exactly
+  # the mode CMAKE_CXX_COMPILER=ZIG_CXX uses for this link. Wiring it directly
+  # into the tracked CMake link flags therefore risks turning a diagnostic
+  # into a hard build break. Instead: capture the EXACT link command ninja
+  # already generated for this failed/passed link, and re-run that same
+  # command with --verbose-link appended as a SEPARATE, side probe -- it never
+  # touches the tracked ninja build state or its cache, so it cannot change
+  # link behaviour either way. If zig accepts the flag here, dumpArgv's output
+  # settles H2 directly; if it is rejected the same way the unix test found,
+  # that rules out this mechanism for a future (non-diagnostic) round.
+  echo "[diag] verbose-link probe: capturing libLLVM.dylib link command from ninja"
+  _diag_link_cmd=$(ninja -C "${LLVM_BUILD}" -t commands LLVM 2>/dev/null | grep -E 'libLLVM[^ ]*\.dylib' | tail -n 1 || true)
+  if [[ -n "${_diag_link_cmd}" ]]; then
+    echo "[diag] verbose-link probe: captured command (${#_diag_link_cmd} bytes), re-running with --verbose-link appended (side probe, does not affect build exit status)"
+    set +e
+    _diag_verbose_out=$(eval "${_diag_link_cmd} --verbose-link" 2>&1)
+    _diag_verbose_rc=$?
+    set -e
+    echo "[diag] verbose-link probe: rc=${_diag_verbose_rc} (output capped to 60 lines below)"
+    echo "${_diag_verbose_out}" | head -n 60
+    unset _diag_verbose_out _diag_verbose_rc
+  else
+    echo "[diag] verbose-link probe: could not capture a libLLVM.dylib link command from 'ninja -t commands LLVM' -- skipping"
+  fi
+  unset _diag_link_cmd
 
   if [[ ${_phase1_rc} -ne 0 ]]; then
     echo "  ERROR: Phase 1 (libLLVM.dylib) build FAILED (rc=${_phase1_rc})."
@@ -863,6 +1035,111 @@ else
 
   if [[ ${_linux_build_rc} -ne 0 ]]; then
     exit ${_linux_build_rc}
+  fi
+
+  # --- [diag] libc++ SONAME collision probe (PR #175 collision class, guard) ---
+  # A pre-link SONAME rename (LIBCXX_SHARED_OUTPUT_NAME=c++-zig on the co-built
+  # libcxx cmake target only, in _runtimes_target.sh) was investigated as the
+  # real fix for the aarch64 native test-phase collision this postmortem
+  # describes below, but the rename was NOT applied: the shared-libc++ name
+  # "libc++.so.1" is a literal string baked into 8+ independent consumer sites
+  # across this recipe (the shared-libc++ probe added by
+  # Lld.zig-prefer-shared-libcxx.patch, _cmake_flags.sh's
+  # CMAKE_CXX_STANDARD_LIBRARIES, _cross_compile.sh's ld-script generator,
+  # post-install.sh's patchelf --add-needed, build.sh's config.h substitution,
+  # and the ppc64le Lld.zig patch's own -lc++/-lc++abi argv) -- several of
+  # which are load-bearing for the currently-green linux-64/ppc64le lanes, and
+  # none of which can be validated without a full CI round. A rename that
+  # missed even one of those sites would trade a test-phase-only, cross-lane-
+  # only collision for a build-time link failure on a green lane, which is
+  # strictly worse. Shipping this diagnostic alone instead: runs on every
+  # linux lane (native and cross), before the symbol check below (which can
+  # itself abort), so it always prints regardless of pass/fail downstream.
+  echo "[diag] libc++ SONAME collision probe (co-built vs any foreign libc++.so.1)"
+  _diag_soname_cobuilt=$(find "${LLVM_INSTALL}/lib" -maxdepth 2 -name 'libc++.so.1' 2>/dev/null | awk 'NR==1')
+  if [[ -z "${_diag_soname_cobuilt}" ]]; then
+    _diag_soname_cobuilt=$(find "${PREFIX}" -maxdepth 6 -name 'libc++.so.1' 2>/dev/null | awk 'NR==1')
+  fi
+  _diag_soname_cobuilt_val=""
+  if [[ -n "${_diag_soname_cobuilt}" ]] && command -v readelf >/dev/null 2>&1; then
+    _diag_soname_cobuilt_val=$(readelf -d "${_diag_soname_cobuilt}" 2>/dev/null | grep SONAME || echo "<no SONAME entry>")
+    echo "[diag]   co-built libc++   : ${_diag_soname_cobuilt}"
+    echo "[diag]   co-built SONAME   : ${_diag_soname_cobuilt_val}"
+  else
+    echo "[diag]   co-built libc++.so.1 not found under ${LLVM_INSTALL}/lib or ${PREFIX}, or readelf unavailable -- skipping"
+  fi
+  _diag_soname_foreign=""
+  while IFS= read -r _diag_soname_cand; do
+    [[ -n "${_diag_soname_cobuilt}" && "${_diag_soname_cand}" -ef "${_diag_soname_cobuilt}" ]] && continue
+    _diag_soname_foreign="${_diag_soname_cand}"
+    break
+  done < <(find "${PREFIX}" "${BUILD_PREFIX}" -maxdepth 6 -name 'libc++.so.1' 2>/dev/null)
+  if [[ -n "${_diag_soname_foreign}" ]] && command -v readelf >/dev/null 2>&1; then
+    _diag_soname_foreign_val=$(readelf -d "${_diag_soname_foreign}" 2>/dev/null | grep SONAME || echo "<no SONAME entry>")
+    echo "[diag]   foreign libc++    : ${_diag_soname_foreign}"
+    echo "[diag]   foreign SONAME    : ${_diag_soname_foreign_val}"
+    if [[ -n "${_diag_soname_cobuilt_val}" && "${_diag_soname_cobuilt_val}" == "${_diag_soname_foreign_val}" ]]; then
+      echo "[diag]   WARN: co-built and foreign libc++ SONAME match -- runtime loader collision is still possible (PR #175 class)"
+    fi
+  else
+    echo "[diag]   no foreign libc++.so.1 found under ${PREFIX} or ${BUILD_PREFIX} at build time -- a same-SONAME package installed later (e.g. in the test env) can still collide"
+  fi
+  unset _diag_soname_cobuilt _diag_soname_cobuilt_val _diag_soname_foreign _diag_soname_foreign_val _diag_soname_cand
+
+  # Post-link libc++ symbol verification (conda-forge PR #175 postmortem):
+  # linux-aarch64 built for 1h51m and then died in the TEST phase with
+  # "symbol lookup error: ... libLLVM.so.21.1: undefined symbol
+  # _ZTVNSt3__119basic_ostringstreamIcNS_11char_traitsIcEENS_9allocatorIcEEEE"
+  # (vtable for std::__1::basic_ostringstream<char>) - libLLVM.so references
+  # a libc++ symbol that the co-built libc++.so.1 does not export. Catch this
+  # HERE, right after libLLVM.so links, instead of hours later at test time.
+  # This ALWAYS prints a short diagnostic (pass or fail) so a passing lane
+  # (linux-64 native) and a failing lane (aarch64 cross) can be diffed.
+  echo "  --- libc++ symbol verification for libLLVM.so ---"
+  echo "    CONDA_BUILD_CROSS_COMPILATION=${CONDA_BUILD_CROSS_COMPILATION:-0}"
+  _llvm_so_check=$(find "${LLVM_BUILD}" -name 'libLLVM.so*' 2>/dev/null | awk 'NR==1')
+  _libcxx_so_check=$(find "${LLVM_INSTALL}/lib" -maxdepth 2 -name 'libc++.so.1' 2>/dev/null | awk 'NR==1')
+  if [[ -z "${_libcxx_so_check}" ]]; then
+    _libcxx_so_check=$(find "${PREFIX}" -maxdepth 6 -name 'libc++.so.1' 2>/dev/null | awk 'NR==1')
+  fi
+  if ! command -v nm >/dev/null 2>&1; then
+    echo "    WARNING: nm not found on PATH - skipping libc++ symbol verification"
+  elif [[ -z "${_llvm_so_check}" ]]; then
+    echo "    WARNING: no libLLVM.so* found under ${LLVM_BUILD} - skipping libc++ symbol verification"
+  elif [[ -z "${_libcxx_so_check}" ]]; then
+    echo "    WARNING: libc++.so.1 not found under ${LLVM_INSTALL}/lib or ${PREFIX} - skipping libc++ symbol verification"
+  else
+    echo "    libLLVM.so   : ${_llvm_so_check}"
+    echo "    libc++.so.1  : ${_libcxx_so_check}"
+    _undef_cxx_syms=$(mktemp "${TMPDIR:-/tmp}/llvm_undef_cxx.XXXXXX")
+    _def_cxx_syms=$(mktemp "${TMPDIR:-/tmp}/libcxx_def_cxx.XXXXXX")
+    nm -D --undefined-only "${_llvm_so_check}" 2>/dev/null | awk '{print $NF}' \
+      | grep -E '^_Z(TV)?NSt3__1' > "${_undef_cxx_syms}" || true
+    nm -D --defined-only "${_libcxx_so_check}" 2>/dev/null | awk '{print $NF}' \
+      | grep -E '^_Z(TV)?NSt3__1' > "${_def_cxx_syms}" || true
+    _n_undef_cxx=$(wc -l < "${_undef_cxx_syms}" 2>/dev/null || echo 0)
+    _n_def_cxx=$(wc -l < "${_def_cxx_syms}" 2>/dev/null || echo 0)
+    _pr175_sym="_ZTVNSt3__119basic_ostringstreamIcNS_11char_traitsIcEENS_9allocatorIcEEEE"
+    if grep -qx "${_pr175_sym}" "${_def_cxx_syms}" 2>/dev/null; then
+      _pr175_sym_status="present"
+    else
+      _pr175_sym_status="MISSING"
+    fi
+    echo "    undefined std::__1 symbols referenced by libLLVM.so : ${_n_undef_cxx}"
+    echo "    defined std::__1 symbols exported by libc++.so.1    : ${_n_def_cxx}"
+    echo "    PR #175 symbol (basic_ostringstream vtable) : ${_pr175_sym_status}"
+    _missing_cxx_syms=$(mktemp "${TMPDIR:-/tmp}/libcxx_missing_cxx.XXXXXX")
+    comm -23 <(sort -u "${_undef_cxx_syms}") <(sort -u "${_def_cxx_syms}") > "${_missing_cxx_syms}" 2>/dev/null || true
+    _n_missing_cxx=$(wc -l < "${_missing_cxx_syms}" 2>/dev/null || echo 0)
+    if [[ "${_n_missing_cxx}" -gt 0 ]]; then
+      echo "    FAIL: ${_n_missing_cxx} std::__1 symbol(s) undefined in libLLVM.so are NOT exported by libc++.so.1:"
+      head -n 20 "${_missing_cxx_syms}" | sed 's/^/      /'
+      rm -f "${_undef_cxx_syms}" "${_def_cxx_syms}" "${_missing_cxx_syms}"
+      echo "  EARLY ABORT: libLLVM.so would fail at runtime with an undefined libc++ symbol."
+      exit 1
+    fi
+    echo "    OK: all std::__1 symbols undefined in libLLVM.so are satisfied by libc++.so.1"
+    rm -f "${_undef_cxx_syms}" "${_def_cxx_syms}" "${_missing_cxx_syms}"
   fi
 fi
 

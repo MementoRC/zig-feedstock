@@ -54,13 +54,181 @@ zig_build_dir="${SRC_DIR}/conda-zig-source"
 mkdir -p "${zig_build_dir}" && cp -r "${cmake_source_dir}"/* "${zig_build_dir}"
 mkdir -p "${cmake_install_dir}" "${ZIG_LOCAL_CACHE_DIR}" "${ZIG_GLOBAL_CACHE_DIR}"
 
+# --- Host-targeted zig C wrappers -------------------------------------------
+# Self-hosting: this track builds zig with zig, so recipe.yaml's zig_impl output
+# intentionally carries NO compiler('c')/compiler('cxx') and CC/CXX arrive unset.
+# Do not "fix" that by re-adding the conda compilers -- replacing them is the
+# point of this track.
+#
+# The zig-llvm component already compiled BUILD-arch wrappers into BUILD_PREFIX
+# (zig-llvm/building/_zig_wrappers.sh) and they persist across the component
+# boundary, but they bake ZIG_TARGET_BUILD and so are only correct for
+# host-runnable tools (llvm-config, tblgen).  Everything in THIS component --
+# zigcpp, the ppc64le lld bundle, and the four create_*_stub helpers below --
+# emits TARGET-linked objects and therefore needs a wrapper baked at the HOST
+# triple.  Those helpers take a compiler PATH as an argument, so there is
+# nowhere to append -target at the call site: it must be baked into the binary.
+#
+# TWO TRIPLES, deliberately different (unlike _zig_wrappers.sh where they
+# coincide):
+#   * the wrapper BINARY is compiled -target <build arch> so it RUNS here;
+#   * @ZIG_TARGET@ is baked as ${ZIG_TRIPLET} (host) so what it EMITS is
+#     target-arch.
+_zig_bootstrap="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}"
+_host_wrap_dir="${BUILD_PREFIX}/bin"
+_host_wrap_ext=""
+if is_not_unix; then
+  _zig_bootstrap="${BUILD_PREFIX}/Library/bin/${CONDA_ZIG_BUILD}.exe"
+  _host_wrap_dir="${BUILD_PREFIX}/Library/bin"
+  _host_wrap_ext=".exe"
+fi
+[[ -x "${_zig_bootstrap}" ]] || {
+  echo "FATAL: bootstrap zig not found at ${_zig_bootstrap}" >&2
+  exit 1
+}
+
+# Build-arch triple for the wrapper BINARY (mirrors _zig_wrappers.sh:145-158,
+# including the .2.17 glibc floor precedent).
+_host_wrap_buildtgt="${ZIG_TARGET_BUILD:-}"
+if [[ -z "${_host_wrap_buildtgt}" || "${_host_wrap_buildtgt}" == "native" ]]; then
+  echo "FATAL: ZIG_TARGET_BUILD is unusable ('${ZIG_TARGET_BUILD:-}')" >&2
+  exit 1
+fi
+case "${_host_wrap_buildtgt}" in
+  *-linux-gnu) _host_wrap_buildtgt="${_host_wrap_buildtgt}.2.17" ;;
+esac
+
+_host_cc="${_host_wrap_dir}/${CONDA_ZIG_HOST}-cc${_host_wrap_ext}"
+echo "=== building host-arch zig wrappers (binary -target ${_host_wrap_buildtgt}, emits -target ${ZIG_TRIPLET}) ==="
+
+if is_not_unix; then
+  # BUILD MACHINE is Windows here (mirrors _zig_wrappers.sh:160-168): the
+  # POSIX wrapper source (zig-cc-unix.c / unix_common.h getuid()/setenv())
+  # does not compile once zig bakes -target x86_64-windows-gnu into it --
+  # clang>=16 hard-errors on undeclared getuid() under zig's windows-gnu
+  # headers. zig-cc-nonunix.c / zig-tool-nonunix.c have no argv0 dispatch
+  # (mode_from_argv0() only exists in zig-cc-unix.c), so each mode must be
+  # compiled separately with the mode baked in, same matrix as
+  # _zig_wrappers.sh:160-230. No force-load-cc/force-load-cxx equivalent:
+  # force-load is a macOS-only linker concept (_zig_wrappers.sh:167), and
+  # build.sh never consumes a host -asm wrapper either, so only cc/cxx/ar/
+  # ranlib are built on this branch.
+  _host_wrap_src="${RECIPE_DIR}/building/zig-cc-nonunix.c"
+  _host_tool_src="${RECIPE_DIR}/building/zig-tool-nonunix.c"
+  [[ -f "${_host_wrap_src}" ]] || {
+    echo "FATAL: wrapper source missing: ${_host_wrap_src}" >&2
+    exit 1
+  }
+  [[ -f "${_host_tool_src}" ]] || {
+    echo "FATAL: wrapper source missing: ${_host_tool_src}" >&2
+    exit 1
+  }
+
+  # find_zig() in nonunix_common.h resolves this filename under
+  # $PREFIX/$CONDA_PREFIX \Library\bin at runtime, so only the basename of
+  # the bootstrap zig binary is needed here (no @ZIG_BIN@ full-path bake-in
+  # on this source, unlike zig-cc-unix.c).
+  _host_bin_name="${CONDA_ZIG_BUILD}${_host_wrap_ext}"
+  _host_is_mingw=0
+  [[ "${ZIG_TRIPLET}" == *-windows-gnu ]] && _host_is_mingw=1
+
+  # $1=source $2=output name (no ext), remaining args passed straight to sed.
+  _compile_host_nonunix_shim() {
+    local _src="$1" _out_name="$2"
+    shift 2
+    local _tmp
+    _tmp="$(mktemp -d)"
+    sed "$@" "${_src}" > "${_tmp}/$(basename "${_src}")"
+    "${_zig_bootstrap}" cc -O2 -target "${_host_wrap_buildtgt}" -I"${RECIPE_DIR}/building" \
+      -o "${_host_wrap_dir}/${CONDA_ZIG_HOST}-${_out_name}${_host_wrap_ext}" \
+      "${_tmp}/$(basename "${_src}")" -lkernel32 || {
+      echo "FATAL: failed to compile ${_src} for ${_out_name}" >&2
+      rm -rf "${_tmp}"
+      exit 1
+    }
+    rm -rf "${_tmp}"
+  }
+
+  _compile_host_nonunix_shim "${_host_wrap_src}" "cc" \
+    -e "s|@ZIG_CC_MODE@|cc|g" -e "s|@ZIG_BIN_NAME@|${_host_bin_name}|g" \
+    -e "s|@ZIG_TARGET@|${ZIG_TRIPLET}|g" -e "s|@ZIG_TARGET_ARCH@|${ZIG_TRIPLET%%-*}|g" \
+    -e "s|@IS_MINGW_TARGET@|${_host_is_mingw}|g"
+  _compile_host_nonunix_shim "${_host_wrap_src}" "cxx" \
+    -e "s|@ZIG_CC_MODE@|c++|g" -e "s|@ZIG_BIN_NAME@|${_host_bin_name}|g" \
+    -e "s|@ZIG_TARGET@|${ZIG_TRIPLET}|g" -e "s|@ZIG_TARGET_ARCH@|${ZIG_TRIPLET%%-*}|g" \
+    -e "s|@IS_MINGW_TARGET@|${_host_is_mingw}|g"
+  _compile_host_nonunix_shim "${_host_tool_src}" "ar" \
+    -e "s|@ZIG_BIN_NAME@|${_host_bin_name}|g" -e 's|@ZIG_PREFIX_ARGS@|"ar"|g'
+  _compile_host_nonunix_shim "${_host_tool_src}" "ranlib" \
+    -e "s|@ZIG_BIN_NAME@|${_host_bin_name}|g" -e 's|@ZIG_PREFIX_ARGS@|"ranlib"|g'
+
+  unset -f _compile_host_nonunix_shim
+  chmod +x "${_host_cc}" "${_host_wrap_dir}/${CONDA_ZIG_HOST}-cxx${_host_wrap_ext}" \
+           "${_host_wrap_dir}/${CONDA_ZIG_HOST}-ar${_host_wrap_ext}" \
+           "${_host_wrap_dir}/${CONDA_ZIG_HOST}-ranlib${_host_wrap_ext}"
+else
+  _host_wrap_src="${RECIPE_DIR}/building/zig-cc-unix.c"
+  [[ -f "${_host_wrap_src}" ]] || {
+    echo "FATAL: wrapper source missing: ${_host_wrap_src}" >&2
+    exit 1
+  }
+
+  # NAMING IS LOAD-BEARING: mode_from_argv0() (zig-cc-unix.c) strips
+  # WRAPPER_PREFIX off basename(argv[0]) and compares the remainder against
+  # "zig-cc" / "zig-cxx" / "zig-asm".  CONDA_ZIG_HOST is "${CONDA_TRIPLET}-zig"
+  # (recipe.yaml:379), so the prefix must be "${CONDA_TRIPLET}-" for the strip to
+  # leave exactly "zig-cc".  A mismatched prefix resolves to MODE_UNKNOWN.
+  _host_wrap_tmp="$(mktemp -d)"
+  # Windows paths carry backslashes, which the C preprocessor reads as escape
+  # sequences once substituted into a string literal (CI: win-64 native job
+  # 101375766038 -- "unknown type name 'attler'" from a mangled \bld\... path).
+  _zig_bootstrap_safe="${_zig_bootstrap//\\//}"
+  sed -e "s|@ZIG_BIN@|${_zig_bootstrap_safe}|g" \
+      -e "s|@ZIG_TARGET@|${ZIG_TRIPLET}|g" \
+      -e "s|@ZIG_TARGET_ARCH@|${ZIG_TRIPLET%%-*}|g" \
+      -e "s|@WRAPPER_PREFIX@|${CONDA_TRIPLET}-|g" \
+      "${_host_wrap_src}" > "${_host_wrap_tmp}/zig-cc-unix.c"
+
+  "${_zig_bootstrap}" cc -O2 -target "${_host_wrap_buildtgt}" -I"${RECIPE_DIR}/building" \
+    -o "${_host_cc}" "${_host_wrap_tmp}/zig-cc-unix.c" || {
+    echo "FATAL: failed to compile ${_host_wrap_src} for host target" >&2
+    rm -rf "${_host_wrap_tmp}"
+    exit 1
+  }
+  rm -rf "${_host_wrap_tmp}"
+
+  # One binary, many names -- dispatch is by basename only.
+  for _host_n in cxx asm ar ranlib force-load-cc force-load-cxx; do
+    cp -f "${_host_cc}" "${_host_wrap_dir}/${CONDA_ZIG_HOST}-${_host_n}${_host_wrap_ext}"
+    chmod +x "${_host_wrap_dir}/${CONDA_ZIG_HOST}-${_host_n}${_host_wrap_ext}"
+  done
+  chmod +x "${_host_cc}"
+fi
+
+# Consumed as bare "${CC}"/"${CXX}" by configure_cmake (building/_build.sh),
+# build_lld_bundle_ppc64le, and the four create_*_stub helpers further down.
+export CC="${_host_cc}"
+export CXX="${_host_wrap_dir}/${CONDA_ZIG_HOST}-cxx${_host_wrap_ext}"
+export AR="${_host_wrap_dir}/${CONDA_ZIG_HOST}-ar${_host_wrap_ext}"
+export RANLIB="${_host_wrap_dir}/${CONDA_ZIG_HOST}-ranlib${_host_wrap_ext}"
+unset _host_wrap_src _host_tool_src _host_wrap_tmp _host_wrap_buildtgt _host_n _zig_bootstrap_safe
+unset _host_bin_name _host_is_mingw
+
 # --- Common CMake/zig configuration ---
 
+# CMAKE_{C,CXX}_COMPILER are passed EXPLICITLY: configure_cmake() sets no
+# compiler of its own and CC/CXX are not supplied by a conda compiler
+# activation on this track.  No CMAKE_*_COMPILER_TARGET is needed -- the host
+# triple is already baked into these wrappers.
 EXTRA_CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE=Release
   -DZIG_TARGET_MCPU=baseline
   -DZIG_TARGET_TRIPLE=${ZIG_TRIPLET}
   -DZIG_USE_LLVM_CONFIG=ON
+  -DCMAKE_C_COMPILER="${CC}"
+  -DCMAKE_CXX_COMPILER="${CXX}"
+  -DCMAKE_AR="${AR}"
+  -DCMAKE_RANLIB="${RANLIB}"
 )
 
 # Remember: CPU MUST be baseline, otherwise it create non-portable zig code (optimized for a given hardware)
@@ -532,10 +700,24 @@ fi
 # for it. Appended to the lld static-archive branch below (Part B).
 is_unix && [[ "${target_platform}" != "linux-s390x" ]] && \
   perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;-lzstd;-lxml2;-lz\"@" "${cmake_build_dir}"/config.h
-is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PREFIX}@" "${cmake_build_dir}"/config.h
+is_osx && is_cross &&   perl -pi -e "s@\Q${BUILD_PREFIX}\E@${PREFIX}@g if /ZIG_LLVM_\w+ \"/" "${cmake_build_dir}"/config.h
 # linux cross now discovers llvm-config from ${BUILD_PREFIX}/lib/zig-llvm/bin (native
 # staged config), so its ZIG_LLVM_* dirs also self-report BUILD_PREFIX -> repoint to PREFIX.
-is_linux && is_cross && perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PREFIX}@" "${cmake_build_dir}"/config.h
+# ppc64le/riscv64 (qemu-emulated) lanes hit the same BUILD_PREFIX leak: is_cross is
+# derived from lane naming and evaluates false there even though llvm-config is still
+# staged under BUILD_PREFIX, so powerpc64le-conda-linux-gnu-ld.real picked up
+# ${BUILD_PREFIX}/lib/zig-llvm/lib/libc++.so ("file in wrong format") when the guard
+# below still required is_cross -- drop the is_cross gate, same treatment as the
+# zlib/zstd/libxml2 fix above.
+# The regex was also anchored to match BUILD_PREFIX only right after the
+# opening quote, with no /g. ZIG_LLVM_LIBRARIES is a semicolon-joined list
+# with multiple entries, so a BUILD_PREFIX path sitting mid-list (not the
+# first entry) was silently never rewritten and still reached the target
+# link. That anchoring bug, not the is_cross gate alone, is why removing the
+# is_cross gate did not fully fix ppc64le/riscv64: the substitution is now
+# global (/g) and matches any ZIG_LLVM_* line, with \Q...\E so path
+# metacharacters in BUILD_PREFIX are treated literally.
+is_linux && perl -pi -e "s@\Q${BUILD_PREFIX}\E@${PREFIX}@g if /ZIG_LLVM_\w+ \"/" "${cmake_build_dir}"/config.h
 # ZIG_SHARED_LIBCXX_DIR is exported only for ppc64le-cross (_cross_compile.sh:30); default it to the
 # canonical zig-llvm shared-libcxx dir so native + other non-ppc64le lanes do not trip set -u here.
 # Value equals the ppc64le-cross export, so that lane is unchanged.
@@ -548,6 +730,38 @@ is_linux &&             perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;${ZIG_SHA
 # Injecting libc++.dylib here would add a second LC_LOAD_DYLIB to the same dylib;
 # macOS SDK >= 26 dyld aborts on duplicate linked dylibs ("duplicate linked dylib
 # '@rpath/libc++.1.dylib'" -- Abort trap: 6).
+
+# Windows: repoint ZIG_LLVM_LIBRARIES at the liblldZig bundle import lib.
+# zig-llvm/building/remove-unneeded.sh:12-16 deletes the standalone
+# liblld{ELF,COFF,MachO,Wasm,MinGW,Common}.a archives that cmake's
+# find_package(LLD) recorded into config.h, keeping only the liblldZig.dll +
+# liblldZig.dll.a bundle built by zig-llvm/building/_lld_bundle.sh (linked
+# with --export-all-symbols and --out-implib). Nothing else wires that
+# bundle in for windows (the only ZIG_LLD_BUNDLE_SO consumer, cmake/0006, is
+# gated `if: ppc64le`), so zig2's self-hosted link fails with undefined
+# lld::coff::link / lld::elf::link / lld::wasm::link / lld::macho::link.
+# Strip the now-dead archive entries and append the bundle import lib
+# instead. No -lc++abi / -lunwind here -- those are unix-only libc++ runtime
+# deps, not part of the win-64 (MinGW-ABI) link.
+if is_not_unix; then
+  _zig_llvm_lib="${PREFIX}/Library/lib/zig-llvm/lib"
+  _lld_bundle_path="${_zig_llvm_lib}/liblldZig.dll.a"
+  _before="$(grep -E '^#define ZIG_LLVM_LIBRARIES' "${cmake_build_dir}"/config.h)"
+  echo "[DIAG round-6 win-lld] BEFORE: ${_before}"
+  # 1. cmake recorded the merged LLVM dll from bin/ with no extension (e.g.
+  #    "zig-llvm/bin/libLLVM-21"); zig needs the import lib in lib/ with the
+  #    .dll.a extension instead.
+  perl -pi -e 's@zig-llvm[/\\\\]bin[/\\\\](libLLVM-\d+)@zig-llvm/lib/$1.dll.a@g' "${cmake_build_dir}"/config.h
+  # 2. strip the dead standalone lld archives -- match both .a and .dll.a,
+  #    since remove-unneeded.sh removes both forms on windows.
+  perl -pi -e "s@[^;\"]*liblld(?:ELF|COFF|MachO|Wasm|MinGW|Common)\.(?:a|dll\.a)@@g" "${cmake_build_dir}"/config.h
+  perl -pi -e "s@;{2,}@;@g; s@(ZIG_LLVM_LIBRARIES \")([^\"]*);\"@\${1}\${2}\"@" "${cmake_build_dir}"/config.h
+  # 3. append the bundle import lib plus its deps.
+  perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;${_lld_bundle_path};-lzstd;-lxml2;-lz;-L${_zig_llvm_lib};-lc++\"@" "${cmake_build_dir}"/config.h
+  _after="$(grep -E '^#define ZIG_LLVM_LIBRARIES' "${cmake_build_dir}"/config.h)"
+  echo "[DIAG round-6 win-lld] AFTER:  ${_after}"
+  unset _zig_llvm_lib _lld_bundle_path _before _after
+fi
 
 # zig2.c (the pre-generated C bootstrap from 0.16) calls getrandom,
 # copy_file_range, and statx -- all absent from conda-forge's glibc 2.17
@@ -584,8 +798,26 @@ if is_linux; then
   create_pthread_atfork_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
   perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/libc_single_threaded_stub.o\"|g" "${cmake_build_dir}/config.h"
   create_libc_single_threaded_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/cxa_thread_atexit_impl_stub.o\"|g" "${cmake_build_dir}/config.h"
-  create_cxa_thread_atexit_impl_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
+  # __cxa_thread_atexit_impl is only needed when the target glibc floor is
+  # below 2.18 (see create_cxa_thread_atexit_impl_stub in _atfork.sh).
+  # Reuse the glibc floor already encoded in ZIG_TRIPLET (recipe.yaml's
+  # zig_triplet, e.g. "riscv64-linux-gnu.2.39" or
+  # "powerpc64le-linux-gnu.2.17") instead of hardcoding an arch list.
+  # atexit() itself lives in glibc's static libc_nonshared.a, not in the
+  # dynamic libc.so.6 symbol table, so an ungated stub's atexit() call
+  # becomes an unresolvable undefined symbol once zig build-exe links a
+  # modern-glibc target -- exactly the riscv64 (glibc 2.39) link failure
+  # this gate fixes. Fail safe toward including the stub if the floor
+  # can't be parsed out of ZIG_TRIPLET.
+  _zig_glibc_floor="${ZIG_TRIPLET#*-linux-gnu.}"
+  _need_cxa_thread_atexit_stub=1
+  if [[ "${_zig_glibc_floor}" != "${ZIG_TRIPLET}" && "${_zig_glibc_floor}" =~ ^2\.([0-9]+)$ ]]; then
+    (( BASH_REMATCH[1] >= 18 )) && _need_cxa_thread_atexit_stub=0
+  fi
+  if [[ "${_need_cxa_thread_atexit_stub}" == "1" ]]; then
+    perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/cxa_thread_atexit_impl_stub.o\"|g" "${cmake_build_dir}/config.h"
+    create_cxa_thread_atexit_impl_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
+  fi
 
   # riscv64: __tls_get_addr is genuinely present in this sysroot, but only
   # in the dynamic loader (ld-linux-riscv64-lp64d.so.1), not in libc.so.6 --
@@ -638,6 +870,18 @@ if [[ "${target_platform}" == "linux-riscv64" ]]; then
   unset _riscv64_sysroot_libc _riscv64_compile_commands
   echo "=== end RISCV64 TLS DIAGNOSTIC ==="
 fi
+
+# ZIG_TR_HOST_PREFIX must NOT be exported any earlier than this point.
+# configure_cmake_zigcpp above (which builds zigcpp against zig-llvm) and
+# the native llvm-config discovery earlier in this script both rely on the
+# wrapper's default CONDA_PREFIX-is-BUILD_PREFIX resolution to find the
+# BUILD-arch libc++.so; exporting this before they run would redirect that
+# resolution to PREFIX and break currently-passing lanes (including native
+# linux-64). Only the final target zig build below (build_zig_with_zig)
+# needs -print-file-name=libc++.so to resolve against the TARGET prefix,
+# via upstream build.zig's addCxxKnownPath (Linux, !use_zig_libcxx branch).
+export ZIG_TR_HOST_PREFIX="${PREFIX}"
+echo "[diag] ${CXX} -print-file-name=libc++.so -> $(${CXX} -print-file-name=libc++.so 2>/dev/null || echo FAILED)"
 
 if build_zig_with_zig "${zig_build_dir}" "${BUILD_ZIG}" "${PREFIX}"; then
   dbg echo "=== ZIG BUILD: SUCCESS ==="

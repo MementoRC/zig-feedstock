@@ -276,8 +276,10 @@ if is_cross || is_osx; then
   echo "=== Building NATIVE (build-arch) libc++ for host tools (e.g. host-tblgen) ==="
   _NATIVE_RUNTIMES_CMAKE=("${_RUNTIMES_CMAKE[@]}")
   _NATIVE_RUNTIMES_FLAGS=("${_RUNTIMES_FLAGS[@]}")
-  _native_cc="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cc"
-  _native_cxx="${BUILD_PREFIX}/bin/${CONDA_ZIG_BUILD}-cxx"
+  # Must not hardcode the Unix bin/ path: on Windows cross lanes (is_cross true,
+  # is_osx false) the build-arch wrappers live under Library/bin/*.exe instead.
+  _native_cc="${ZIG_CC}"
+  _native_cxx="${ZIG_CXX}"
   _NATIVE_RUNTIMES_CMAKE+=(
     -DCMAKE_C_COMPILER="${_native_cc}"
     -DCMAKE_CXX_COMPILER="${_native_cxx}"
@@ -366,6 +368,19 @@ if is_cross || is_osx; then
       "-DCMAKE_EXE_LINKER_FLAGS=${_native_ldflags}"
     )
   fi
+  # CI symptom (native pass only, e.g. ppc64le PR #175): ld.lld "unable to find
+  # library from dependent library specifier: pthread/rt" linking libc++.so.1.0.
+  # zig's bundled glibc merges pthread/rt into libc, so no standalone .so exists
+  # for the .deplibs record. Suppress emission of that link directive at compile
+  # time (the -L injection at :357-370 and --no-dependent-libraries at :350-356
+  # are already refuted/dead); LIBCXX_HAS_PTHREAD_API is untouched, so the API stays.
+  if is_linux; then
+    _NATIVE_RUNTIMES_FLAGS+=(
+      -DLIBCXX_HAS_PTHREAD_LIB=OFF
+      -DLIBCXXABI_HAS_PTHREAD_LIB=OFF
+      -DLIBCXX_HAS_RT_LIB=OFF
+    )
+  fi
   # _NATIVE_RUNTIMES_CMAKE was cloned from _RUNTIMES_CMAKE, which already carries
   # -DCMAKE_OSX_ARCHITECTURES for the TARGET arch. Left as-is, the native
   # (BUILD-arch) zig-cc is invoked with the wrong -arch (e.g. an arm64 host
@@ -403,6 +418,44 @@ if is_cross || is_osx; then
     )
   fi
   mkdir -p "${SRC_DIR}/conda-runtimes-build-native"
+
+  # macOS native lane: pin CMAKE_OSX_SYSROOT to CONDA_BUILD_SYSROOT so this
+  # pass's cmake-auto-derived -isysroot agrees with the main LLVM build pass
+  # (see _cmake_flags.sh's native-osx CMAKE_OSX_SYSROOT pin -- same source
+  # variable, same guard). Round-5 CI evidence (PR #175, osx-arm64) showed
+  # this pass configuring with CMAKE_OSX_SYSROOT unset, so cmake auto-detected
+  # an Xcode SDK while the main LLVM pass used the pinned MacOSX11.0.sdk --
+  # an SDK mismatch across sub-builds. Native-only, mirroring _cmake_flags.sh:
+  # cmake does not auto-populate CMAKE_OSX_SYSROOT on cross builds, so the two
+  # cross lanes already get a single consistent (CONDA_BUILD_SYSROOT) sysroot
+  # without this pin and must not be widened into it. Omit the flag entirely
+  # (rather than emit an empty value) if CONDA_BUILD_SYSROOT is unset or
+  # missing its usr/lib.
+  if is_osx && ! is_cross; then
+    if [[ -n "${CONDA_BUILD_SYSROOT:-}" && -d "${CONDA_BUILD_SYSROOT}/usr/lib" ]]; then
+      _NATIVE_RUNTIMES_CMAKE+=(
+        -DCMAKE_OSX_SYSROOT="${CONDA_BUILD_SYSROOT}"
+      )
+    fi
+  fi
+
+  # [diag] osx-arm64 native lane H1/H2 investigation: confirm whether the pin
+  # above actually took effect for this NATIVE (build-arch) runtimes pass.
+  if is_osx; then
+    _diag_osx_sysroot="<not set in _NATIVE_RUNTIMES_CMAKE>"
+    for _f in "${_NATIVE_RUNTIMES_CMAKE[@]}"; do
+      [[ "${_f}" == -DCMAKE_OSX_SYSROOT=* ]] && _diag_osx_sysroot="${_f#-DCMAKE_OSX_SYSROOT=}"
+    done
+    echo "[diag] native runtimes cmake configure: CMAKE_OSX_SYSROOT=${_diag_osx_sysroot}"
+    echo "[diag] native runtimes cmake configure: CONDA_BUILD_SYSROOT=${CONDA_BUILD_SYSROOT:-<unset>}"
+    if ! is_cross; then
+      echo "[diag] native runtimes cmake configure: -isysroot now derives from the pinned CMAKE_OSX_SYSROOT above; no explicit --sysroot linker flag is injected by this script for this pass"
+    else
+      echo "[diag] native runtimes cmake configure: cross lane, no CMAKE_OSX_SYSROOT pin applied (cmake does not auto-populate it on cross); no explicit --sysroot linker flag is injected by this script for this pass"
+    fi
+    unset _diag_osx_sysroot _f
+  fi
+
   cmake -S "${LIBCXX_SRC}" -B "${SRC_DIR}/conda-runtimes-build-native" \
     "${_NATIVE_RUNTIMES_CMAKE[@]}" \
     -DLLVM_ENABLE_RUNTIMES="${_RUNTIMES_LIST}" \
