@@ -44,9 +44,10 @@ context:
 
   # Zig target mapping https://github.com/ziglang/zig-bootstrap
   _c_v: ${{ c_stdlib_version | default("") }}
-  _zig_glibc: ${{ "2.27" if xc_riscv64 else _c_v }}
-  # Same 2.27 riscv64 floor as _zig_glibc, keyed on target_platform (not cross_target_platform_)
-  _zig_glibc_tgt: ${{ "2.27" if target_platform == "linux-riscv64" else _c_v }}
+  _zig_glibc: ${{ "2.27" if (xc_riscv64 and _c_v == "2.17") else _c_v }}
+  # 2.27 is a FLOOR, not an override: riscv64 predates glibc 2.27, but conda-forge
+  # now ships it at 2.39 and forcing 2.27 would drag the triplet below its sysroot.
+  _zig_glibc_tgt: ${{ "2.27" if (target_platform == "linux-riscv64" and _c_v == "2.17") else _c_v }}
   zig_triplet: >-
     ${{
       "x86_64-linux-gnu." ~ _zig_glibc        if xc_l64                              else
@@ -336,6 +337,8 @@ outputs:
 
           # Local debug switch.
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
+          ZIG_DIAG: ${{ env.get("ZIG_DIAG", default="1") }}
+          ZIG_LANGREF_TIMEOUT: ${{ env.get("ZIG_LANGREF_TIMEOUT", default="5h") }}
     requirements:
       build:
         # --- Common build deps (all cases) ---
@@ -451,7 +454,7 @@ outputs:
                 - libcxx
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
         files:
           recipe:
             - testing/_test_utils.py
@@ -476,7 +479,7 @@ outputs:
             - if: linux
               then:
                 - binutils_impl_${{ target_platform }}
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
         files:
           recipe:
             - testing/_test_utils.py
@@ -509,7 +512,7 @@ outputs:
           run:
             - if: linux
               then:
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
         files:
           source:
             - zig-source/test/behavior.zig
@@ -579,7 +582,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
 
       # NOTE: test_mingw_crt.py's deep content checks are win-64-only (xc_w64 below);
       # presence/size for all three targets is asserted inside _mingw.sh itself.
@@ -621,6 +624,8 @@ outputs:
           NEEDS_EMULATION: ${{ linux and build_platform != target_platform }}
 
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
+          ZIG_DIAG: ${{ env.get("ZIG_DIAG", default="1") }}
+          ZIG_LANGREF_TIMEOUT: ${{ env.get("ZIG_LANGREF_TIMEOUT", default="5h") }}
     requirements:
       build:
         - python 3.12.*
@@ -849,7 +854,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
 
   # ==========================================================================
   # TOOLCHAIN META-PACKAGE: zig-compiler (toolchain metapackage)
@@ -889,7 +894,7 @@ outputs:
           run:
             - if: linux and build_platform != target_platform
               then:
-                - sysroot_${{ target_platform }} >=${{ c_stdlib_version }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
 
 about:
   homepage: https://ziglang.org/

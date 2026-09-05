@@ -26,6 +26,7 @@ export build_platform="${build_platform:-${target_platform}}"
 # --- Functions ---
 
 source "${RECIPE_DIR}/building/_common.sh"
+source "${RECIPE_DIR}/building/_zig_diag.sh"
 source "${RECIPE_DIR}/building/_build.sh"  # configure_cmake_zigcpp, build_zig_with_zig
 
 # --- Early exits ---
@@ -199,9 +200,20 @@ if is_linux && is_cross; then
   _qemu_shadow_dir=""
   if [ -n "${_zig_qemu}" ]; then
     export QEMU_EXECVE="${_zig_qemu}"
+    # Emulated libc-linked binaries need the loader resolved against the TARGET
+    # sysroot; unset, qemu uses the host root and they SIGSEGV.
+    if [ -z "${QEMU_LD_PREFIX:-}" ] && [ -n "${CONDA_BUILD_SYSROOT:-}" ] && [ -d "${CONDA_BUILD_SYSROOT}" ]; then
+      export QEMU_LD_PREFIX="${CONDA_BUILD_SYSROOT}"
+    fi
+    zig_diag_note "qemu: QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-(unset)}"
     case "$(basename "${_zig_qemu}")" in
-      qemu-execve-*) export QEMU_EXECVE_NATIVE_PASSTHROUGH=1 ;;
-      *) dbg echo "qemu: ${_zig_qemu} is not qemu-execve-*; native passthrough NOT armed" ;;
+      qemu-execve-*)
+        export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
+        zig_diag_note "qemu: native passthrough ARMED via ${_zig_qemu}"
+        ;;
+      *)
+        zig_diag_note "qemu: ${_zig_qemu} is not qemu-execve-*; native passthrough NOT armed"
+        ;;
     esac
     _qemu_shadow_dir="$(mktemp -d)"
     ln -sf "${_zig_qemu}" "${_qemu_shadow_dir}/qemu-${ZIG_QEMU_ARCH}"
@@ -295,6 +307,8 @@ if is_linux; then
 fi
 
 
+zig_diag_env "pre-phase1"
+zig_diag_note "PHASE 1: building zig"
 if build_zig_with_zig "${zig_build_dir}" "${BUILD_ZIG}" "${PREFIX}"; then
   dbg echo "=== ZIG BUILD: SUCCESS ==="
 else
@@ -328,7 +342,7 @@ _can_run_stage3() {
 if [[ "${SKIP_LANGREF:-0}" == "1" ]]; then
   echo "INFO: Phase 2 langref skipped: SKIP_LANGREF=1 (local dev override)" >&2
 elif _can_run_stage3; then
-  dbg echo "=== PHASE 2: building langref via stage3 zig ==="
+  zig_diag_note "PHASE 2: building langref via stage3 zig"
   _stage3_runner=()
   if is_cross && is_linux; then
     _stage3_runner=("qemu-${ZIG_QEMU_ARCH}")
@@ -337,20 +351,50 @@ elif _can_run_stage3; then
   # PATH already carries the qemu-<llvm-arch> shadow set up before -fqemu was
   # decided; _stage3_runner below resolves through it.
 
+  _phase2_diag_flags=()
+  zig_diag_on && _phase2_diag_flags=(--verbose --summary all)
+
+  # Bound langref so a hung lane ends instead of hitting the CI job ceiling.
+  _phase2_timeout=()
+  _phase2_timed_out=0
+  if [[ "${ZIG_LANGREF_TIMEOUT:-5h}" != "0" ]] && command -v timeout &>/dev/null; then
+    _phase2_timeout=(timeout --kill-after=60s "${ZIG_LANGREF_TIMEOUT:-5h}")
+  fi
+
   (
     cd "${cmake_source_dir}" &&
-    "${_stage3_runner[@]+"${_stage3_runner[@]}"}" "${PREFIX}/bin/zig" build langref \
+    zig_diag_exec "phase2-langref" -- \
+      "${_phase2_timeout[@]+"${_phase2_timeout[@]}"}" \
+      "${_stage3_runner[@]+"${_stage3_runner[@]}"}" "${PREFIX}/bin/zig" build langref \
       --prefix "${PREFIX}" \
       -Dversion-string="${PKG_VERSION}" \
-      -Ddoctest-target="${ZIG_TRIPLET}"
+      -Ddoctest-target="${ZIG_TRIPLET}" \
+      ${_phase2_diag_flags[@]+"${_phase2_diag_flags[@]}"}
   ) || {
-    echo "ERROR: Phase 2 langref build failed" >&2
-    exit 1
+    _phase2_rc=$?
+    if [[ ${_phase2_rc} -eq 124 || ${_phase2_rc} -eq 137 ]]; then
+      # Non-fatal: an emulated lane can legitimately exceed the bound.  The
+      # langref.html install happens before the doctests run, so a late
+      # timeout still leaves a usable artifact; verify that below.
+      echo "WARNING: Phase 2 langref TIMED OUT after ${ZIG_LANGREF_TIMEOUT:-5h} (rc=${_phase2_rc}); continuing" >&2
+      zig_diag_note "phase2-langref TIMED OUT rc=${_phase2_rc} -- continuing (non-fatal)"
+      _phase2_timed_out=1
+    else
+      echo "ERROR: Phase 2 langref build failed (rc=${_phase2_rc})" >&2
+      exit 1
+    fi
   }
 
   if [ -n "${_qemu_shadow_dir:-}" ]; then
     rm -rf "${_qemu_shadow_dir}"
     unset _qemu_shadow_dir
+  fi
+
+  # A timeout is tolerated only if langref.html actually made it out; the
+  # package_contents check (recipe.yaml, strict) requires it.
+  if [[ ${_phase2_timed_out} -eq 1 ]] && [[ ! -f "${PREFIX}/doc/langref.html" ]]; then
+    echo "ERROR: Phase 2 langref timed out BEFORE doc/langref.html was installed" >&2
+    exit 1
   fi
 else
   echo "INFO: Phase 2 langref skipped: stage3 not runnable on this host (cross without qemu/wine)" >&2
