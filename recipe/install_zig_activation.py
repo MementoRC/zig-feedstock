@@ -117,8 +117,6 @@ def main():
         else:
             install_unix_cross_wrappers(prefix, recipe_dir, native_triplet, conda_triplet, zig_triplet)
 
-    print("=== Zig Activation Package Installation Complete ===")
-
 
 def _install_template(src: Path, dst: Path, replacements: dict, executable: bool = False):
     """Read a template file, apply @PLACEHOLDER@ substitutions, write to dst."""
@@ -274,8 +272,6 @@ def _compile_c_shim(src: Path, dst: Path, replacements: dict, extra_args: tuple 
         pdb.unlink()
         print(f"  Removed: {pdb}")
 
-    print(f"  Compiled: {dst}" + (f" (-target {target})" if target else ""))
-
     _assert_x86_baseline(dst, target)
 
 
@@ -390,7 +386,8 @@ def install_zig_cc_wrappers(
         cc_src = recipe_dir / "building" / "zig-cc-nonunix.c"
         if cc_src.exists():
             is_mingw = "mingw32" in conda_triplet
-            for mode, exe_name in [("cc", "zig-cc"), ("c++", "zig-cxx")]:
+            cc_modes = [("cc", "zig-cc"), ("c++", "zig-cxx")]
+            for mode, exe_name in cc_modes:
                 mode_replacements = {
                     **replacements,
                     "@ZIG_CC_MODE@": mode,
@@ -398,6 +395,7 @@ def install_zig_cc_wrappers(
                     "@IS_MINGW_TARGET@": "1" if is_mingw else "0",
                 }
                 _compile_c_shim(cc_src, wrapper_dir / f"{conda_triplet}-{exe_name}.exe", mode_replacements, extra_args=("-lkernel32",))
+            print(f"Compiled {len(cc_modes)} cc/cxx shims")
 
         # Compile .exe shims for simple pass-through tools
         tool_src = recipe_dir / "building" / "zig-tool-nonunix.c"
@@ -417,6 +415,7 @@ def install_zig_cc_wrappers(
                     "@ZIG_PREFIX_ARGS@": prefix_args,
                 }
                 _compile_c_shim(tool_src, wrapper_dir / f"{conda_triplet}-{name}.exe", tool_replacements, extra_args=("-lkernel32",))
+            print(f"Compiled {len(tool_prefix_args)} tool shims")
 
         # Compile zig-windres.exe (dedicated shim with -o -> -fo translation)
         windres_src = recipe_dir / "building" / "zig-windres-nonunix.c"
@@ -460,7 +459,7 @@ def install_zig_cc_wrappers(
             dst = wrapper_dir / f"{conda_triplet}-{name}"
             shutil.copyfile(first, dst)
             shutil.copymode(first, dst)
-            print(f"  Installed (multiplexer copy): {dst}")
+        print(f"Installed {len(mux_names)} multiplexer wrappers (1 compiled, {len(mux_names) - 1} copied)")
 
 
 def install_unix_cross_wrappers(

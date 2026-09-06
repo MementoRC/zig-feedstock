@@ -10,6 +10,7 @@ source "${RECIPE_DIR}/building/_bash_check.sh"
 # --- Functions ---
 
 source "${RECIPE_DIR}/building/_common.sh"
+source "${RECIPE_DIR}/building/_zig_diag.sh"
 source "${RECIPE_DIR}/building/_build.sh"  # configure_cmake_zigcpp, build_zig_with_zig
 
 # --- Early exits ---
@@ -371,15 +372,11 @@ generate_mingw_import_libs
 # Strip Python bytecode caches from anywhere under PREFIX (was previously
 # scoped to lib/zig but rattler-build's strict-mode check fired on
 # lib/zig/lldb/__pycache__/pretty_printers.cpython-312.pyc even after a
-# narrower find ran — widening to ${PREFIX} as belt-and-braces, and adding
-# visible echo + -print output so we can confirm the find actually executes
-# on the next iteration. .pyc files are Python-version-locked
-# (cpython-312 tag), auto-regenerate on first import, and serve no purpose
-# in a shipped conda package.
-echo "[build.sh] Stripping __pycache__ dirs from ${PREFIX}..."
+# narrower find ran — widening to ${PREFIX} as belt-and-braces. .pyc files
+# are Python-version-locked (cpython-312 tag), auto-regenerate on first
+# import, and serve no purpose in a shipped conda package.
 if [[ -d "${PREFIX}" ]]; then
-    find "${PREFIX}" -type d -name __pycache__ -print -exec rm -rf {} + 2>&1 || true
-    echo "[build.sh] __pycache__ strip done"
+    find "${PREFIX}" -type d -name __pycache__ -exec rm -rf {} + 2>&1 || true
 else
     echo "[build.sh] WARNING: ${PREFIX} does not exist — find skipped"
 fi

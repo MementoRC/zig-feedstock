@@ -157,11 +157,7 @@ ZIG_BUILD_ARGS=(
 #   Bootstrap = conda zig_impl OR upstream tarball (see BUILD_NATIVE_STAGE1_ONLY)
 #   Output = zig binary WITH ZSTD decompression + debug info
 # ==========================================================================
-echo ""
-echo "================================================================"
-echo "  STAGE 1: Building zig (skip docgen, ZSTD patch applied)"
-echo "  Bootstrap: ${ZIG_BIN}"
-echo "================================================================"
+echo "[Stage 1] Building zig (skip docgen, ZSTD patch applied); bootstrap: ${ZIG_BIN}"
 
 STAGE1_DIR="${WORK_DIR}/stage1-install"
 mkdir -p "${STAGE1_DIR}"
@@ -222,9 +218,7 @@ echo "[Stage 1] Installed LD_LIBRARY_PATH wrapper at ${STAGE1_ZIG}"
 if ! "${STAGE1_ZIG}" version > /dev/null 2>&1; then
     echo "ERROR: Stage 1 zig at ${STAGE1_ZIG} fails to execute (segfault or runtime error)" >&2
     echo "" >&2
-    echo "----- stage1-build.log (last 200 lines) -----" >&2
     tail -n 200 "${WORK_DIR}/stage1-build.log" >&2 || echo "(log unreadable)" >&2
-    echo "----- end stage1-build.log -----" >&2
     exit 1
 fi
 
@@ -270,11 +264,7 @@ fi
 #   This tests whether patch 0004 fixes the doctest -lc crashes
 #   Do NOT strip failing langref tests — we want them to run
 # ==========================================================================
-echo ""
-echo "================================================================"
-echo "  STAGE 2: Rebuilding WITH docgen (langref doctests enabled)"
-echo "  Bootstrap: ${STAGE1_ZIG} (Stage 1, has ZSTD patch)"
-echo "================================================================"
+echo "[Stage 2] Rebuilding WITH docgen (langref doctests enabled); bootstrap: ${STAGE1_ZIG} (Stage 1, has ZSTD patch)"
 
 STAGE2_DIR="${WORK_DIR}/stage2-install"
 mkdir -p "${STAGE2_DIR}"
@@ -287,12 +277,7 @@ cd "${SRC_DIR}/zig-source"
     "${ZIG_BUILD_ARGS[@]}" \
     -Doptimize=ReleaseSafe \
     2>&1 | tee "${WORK_DIR}/stage2-build.log" || {
-    echo ""
-    echo "================================================================"
-    echo "  STAGE 2 FAILED — doctest crash details above"
-    echo "  Full log: ${WORK_DIR}/stage2-build.log"
-    echo "================================================================"
-    echo ""
+    echo "STAGE 2 FAILED — doctest crash details above (full log: ${WORK_DIR}/stage2-build.log)"
     echo "The Stage 1 zig (with ZSTD patch + debug info) is at:"
     echo "  ${STAGE1_ZIG}"
     echo ""
@@ -309,10 +294,7 @@ cd "${SRC_DIR}/zig-source"
     exit 1
 }
 
-echo ""
-echo "================================================================"
-echo "  STAGE 2 SUCCESS — langref doctests passed with ZSTD patch!"
-echo "================================================================"
+echo "[Stage 2] SUCCESS — langref doctests passed with ZSTD patch!"
 
 # 7. Stash the Stage 2 zig binary and fix RPATH
 #    The binary was built against the temp env (ENV_DIR) which gets deleted.

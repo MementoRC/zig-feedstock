@@ -1,6 +1,6 @@
 --- a/src/codegen/llvm.zig
 +++ b/src/codegen/llvm.zig
-@@ -1480,7 +1480,7 @@
+@@ -1190,7 +1190,7 @@
              const lf = comp.bin_file orelse break :coff_export_flags;
              const lld = lf.cast(.lld) orelse break :coff_export_flags;
              const coff = switch (lld.ofmt) {

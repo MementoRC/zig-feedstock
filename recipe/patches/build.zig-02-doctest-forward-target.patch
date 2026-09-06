@@ -1,6 +1,6 @@
 --- a/build.zig
 +++ b/build.zig
-@@ -1493,6 +1493,8 @@
+@@ -1616,6 +1616,8 @@
  };
 
  fn generateLangRef(b: *std.Build) !std.Build.LazyPath {
@@ -9,7 +9,7 @@
      const io = b.graph.io;
      const arena = b.graph.arena;
 
-@@ -1536,6 +1538,9 @@
+@@ -1660,6 +1662,9 @@
 
          cmd.addArg("-o");
          _ = wf.addCopyFile(cmd.addOutputFileArg(out_basename), out_basename);
