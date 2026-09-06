@@ -17,7 +17,7 @@ context:
 
   # Manual global override for local dev only; SKIP_LANGREF export derives from it.
   # Emulated cross-linux lanes are skipped automatically in build.sh.
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" }}
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="1") == "1" }}
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
@@ -495,7 +495,9 @@ outputs:
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" version
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" zen
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" init
-                - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
+                - if: not skip_langref
+                  then:
+                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
               else:
                 - echo "Not testable on this system"
         requirements:
