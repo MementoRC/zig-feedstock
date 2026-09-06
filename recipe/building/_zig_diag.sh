@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Zig build diagnostics, gated entirely on DEBUG_ZIG_BUILD (reuses the existing
-# recipe.yaml-plumbed toggle -- no new variable, no recipe.yaml changes needed).
-# Default (DEBUG_ZIG_BUILD unset or "0") is completely silent: nothing in this
-# file prints. zig_diag_exec still always runs its command and re-raises its
-# exit code regardless of the gate -- only its instrumentation output is gated.
+# Zig build diagnostics, two tiers (reuses the recipe.yaml-plumbed
+# DEBUG_ZIG_BUILD toggle -- no new variable, no recipe.yaml changes needed).
+#   ALWAYS-ON: paired phase BEGIN/END spans with rc + elapsed, plus a one-line
+#     host fingerprint.  A handful of lines per build.  These make a failed
+#     multi-hour emulated lane analysable without paying for a re-run, and a
+#     BEGIN with no matching END means killed from outside.
+#   GATED on DEBUG_ZIG_BUILD=1: env dumps and per-command verbosity.
+# zig_diag_exec always runs its command and re-raises its exit code -- the gate
+# only ever affects output, never control flow.
 # Never fails the build -- every external command is guarded (command -v /
 # || true) so this file is safe under set -euo pipefail.
 
@@ -14,7 +18,17 @@ source "${RECIPE_DIR}/building/_common.sh"
 
 zig_diag_on() { [[ "${DEBUG_ZIG_BUILD:-0}" == "1" ]]; }
 
-# Gated -- silent unless DEBUG_ZIG_BUILD=1.
+# Always-on tier -- never gated.
+zig_diag_span() { echo "[zig-diag] $*" >&2; }
+
+# One always-on line: the host facts that explain scheduling behaviour later.
+zig_diag_fingerprint() {
+  local _n="unknown"
+  command -v nproc &>/dev/null && _n=$(nproc) || true
+  zig_diag_span "host: nproc=${_n} target=${target_platform:-<unset>} build=${build_platform:-<unset>} triplet=${ZIG_TRIPLET:-<unset>}"
+}
+
+# Gated tier -- silent unless DEBUG_ZIG_BUILD=1.
 zig_diag_note() {
   zig_diag_on || return 0
   echo "[zig-diag] $*" >&2
@@ -44,26 +58,26 @@ zig_diag_env() {
   return 0
 }
 
-# Always runs the command and re-raises its exit code unchanged, regardless
-# of the gate; only the BEGIN/END instrumentation output is gated.
+# Always runs the command and re-raises its exit code unchanged.  BEGIN/END
+# spans are always-on and PAIRED -- a BEGIN with no END means the process was
+# killed from outside before its own timeout fired.  Only the echoed command
+# line is gated.
 zig_diag_exec() {
   local label="$1"; shift
   [[ "${1:-}" == "--" ]] && shift
-  local _on=0
   if zig_diag_on; then
-    _on=1
-    zig_diag_note "BEGIN ${label}: $*"
+    zig_diag_span "BEGIN ${label}: $*"
+  else
+    zig_diag_span "BEGIN ${label}"
   fi
   local _start=${SECONDS}
   local rc=0
   "$@" || rc=$?
-  if [[ ${_on} -eq 1 ]]; then
-    local _elapsed=$((SECONDS - _start))
-    local _sig=""
-    if [[ ${rc} -ge 128 ]]; then
-      _sig=" signal=$(kill -l $((rc - 128)) 2>/dev/null || echo unknown)"
-    fi
-    zig_diag_note "END ${label}: rc=${rc} elapsed=${_elapsed}s${_sig}"
+  local _elapsed=$((SECONDS - _start))
+  local _sig=""
+  if [[ ${rc} -ge 128 ]]; then
+    _sig=" signal=$(kill -l $((rc - 128)) 2>/dev/null || echo unknown)"
   fi
+  zig_diag_span "END ${label}: rc=${rc} elapsed=${_elapsed}s${_sig}"
   return ${rc}
 }
