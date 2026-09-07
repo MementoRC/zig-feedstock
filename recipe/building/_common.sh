@@ -67,3 +67,44 @@ sanitize_and_export_cross_flags() {
     export "${_v}"
   done
 }
+
+_cfg_subst() {  # _cfg_subst FILE PATTERN REPL [g]
+  python - "$@" <<'PY'
+import re, sys
+path, pat, repl = sys.argv[1], sys.argv[2], sys.argv[3]
+count = 0 if len(sys.argv) > 4 else 1
+with open(path, 'r', newline='') as f:
+    data = f.read()
+with open(path, 'w', newline='') as f:
+    f.write(''.join(re.sub(pat, repl, ln, count=count)
+                    for ln in data.splitlines(keepends=True)))
+PY
+}
+
+_cfg_subst_lit() {  # _cfg_subst_lit FILE LITERAL REPL -- literal, global, ZIG_LLVM_ lines only
+  python - "$@" <<'PY'
+import sys
+path, lit, repl = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def spellings(p):
+    """MSYS POSIX (/c/x), CMake (C:/x) and native (C:\\x) forms of one path."""
+    forms = [p]
+    if len(p) > 2 and p[0] == '/' and p[2] == '/':
+        drive, rest = p[1].upper(), p[3:]
+        forms.append(drive + ':/' + rest)
+        forms.append(drive + ':\\' + rest.replace('/', '\\'))
+    return forms
+
+pairs = list(zip(spellings(lit), spellings(repl)))
+with open(path, 'r', newline='') as f:
+    data = f.read()
+out = []
+for ln in data.splitlines(keepends=True):
+    if 'ZIG_LLVM_' in ln:
+        for a, b in pairs:
+            ln = ln.replace(a, b)
+    out.append(ln)
+with open(path, 'w', newline='') as f:
+    f.write(''.join(out))
+PY
+}

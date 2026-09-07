@@ -35,6 +35,12 @@ def main() -> None:
     if zig_cc_exe is None:
         sys.exit("FAIL: no <arch>-w64-mingw32-zig-cc wrapper found on PATH")
 
+    # The candidate list is ordered and the first hit wins, so a lane carrying
+    # several wrappers silently exercises only one. Name it, and name the rest.
+    on_path = [c for c in candidates if shutil.which(c)]
+    print(f"INFO: using wrapper: {zig_cc_exe}")
+    print(f"INFO: wrappers on PATH: {', '.join(on_path)}")
+
     # Minimal Windows C source with custom entry point
     c_source = """#include <windows.h>
 void MyEntry(void) { ExitProcess(0); }
@@ -57,16 +63,16 @@ void MyEntry(void) { ExitProcess(0); }
         if result.returncode != 0:
             stderr_short = result.stderr[:500]
             sys.exit(
-                f"FAIL: zig-cc -Wl,-eMyEntry test1.c failed "
+                f"FAIL: [{zig_cc_exe}] -Wl,-eMyEntry test1.c failed "
                 f"(rc={result.returncode}): {stderr_short}"
             )
 
         if not exe_file_1.is_file():
-            sys.exit(f"FAIL: zig-cc did not create {exe_file_1}")
+            sys.exit(f"FAIL: [{zig_cc_exe}] did not create {exe_file_1}")
 
         size_1 = exe_file_1.stat().st_size
         if size_1 == 0:
-            sys.exit(f"FAIL: zig-cc output {exe_file_1} is empty (0 bytes)")
+            sys.exit(f"FAIL: [{zig_cc_exe}] output {exe_file_1} is empty (0 bytes)")
 
         # Test 2: -Wl,-e,SYM (COMMA form)
         c_file_2 = tmpdir_path / "test2.c"
@@ -82,18 +88,18 @@ void MyEntry(void) { ExitProcess(0); }
         if result.returncode != 0:
             stderr_short = result.stderr[:500]
             sys.exit(
-                f"FAIL: zig-cc -Wl,-e,MyEntry test2.c failed "
+                f"FAIL: [{zig_cc_exe}] -Wl,-e,MyEntry test2.c failed "
                 f"(rc={result.returncode}): {stderr_short}"
             )
 
         if not exe_file_2.is_file():
-            sys.exit(f"FAIL: zig-cc did not create {exe_file_2}")
+            sys.exit(f"FAIL: [{zig_cc_exe}] did not create {exe_file_2}")
 
         size_2 = exe_file_2.stat().st_size
         if size_2 == 0:
-            sys.exit(f"FAIL: zig-cc output {exe_file_2} is empty (0 bytes)")
+            sys.exit(f"FAIL: [{zig_cc_exe}] output {exe_file_2} is empty (0 bytes)")
 
-    print(f"PASS: -Wl,-eSYM and -Wl,-e,SYM translated to -Wl,--entry,SYM; output sizes: {size_1} {size_2}")
+    print(f"PASS: [{zig_cc_exe}] -Wl,-eSYM and -Wl,-e,SYM translated to -Wl,--entry,SYM; output sizes: {size_1} {size_2}")
 
 
 if __name__ == "__main__":

@@ -226,8 +226,12 @@ fi
 # zstd (compression), libxml2. Needed on every native + cross linux
 # build — linux-aarch64 failed linking zig2 with undefined adler32
 # when this was gated on `is_cross`.
-is_linux && perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;-lzstd;-lxml2;-lz\"@" "${cmake_build_dir}"/config.h
-is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PREFIX}@" "${cmake_build_dir}"/config.h
+is_linux && _cfg_subst "${cmake_build_dir}/config.h" '(ZIG_LLVM_LIBRARIES ".*)"' '\1;-lzstd;-lxml2;-lz"'
+# Cross builds resolve LLVM on the build machine, so config.h's ZIG_LLVM_* paths
+# point into ${BUILD_PREFIX} — the wrong architecture. Windows needs the literal
+# form: CMake writes native paths (C:/… or C:\…), ${BUILD_PREFIX} is MSYS (/c/…).
+is_osx      && is_cross && _cfg_subst     "${cmake_build_dir}/config.h" "(ZIG_LLVM_\\w+ \")${BUILD_PREFIX}" "\\1${PREFIX}"
+is_not_unix && is_cross && _cfg_subst_lit "${cmake_build_dir}/config.h" "${BUILD_PREFIX}" "${PREFIX}"
 # Note: do NOT inject ${PREFIX}/lib/libc++.dylib into ZIG_LLVM_LIBRARIES on macOS.
 # build.zig sets mod.link_libcpp = true for darwin targets, which (via patches/
 # Lld.zig-prefer-shared-libcxx.patch) already resolves to ${PREFIX}/lib/libc++.1.dylib.
@@ -245,7 +249,7 @@ is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PRE
 if is_linux && [[ -n "${CONDA_BUILD_SYSROOT:-}" ]]; then
   source "${RECIPE_DIR}/building/_glibc217_syscall_stubs.sh"
   create_glibc217_syscall_stubs "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/glibc217_syscall_stubs.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/glibc217_syscall_stubs.o\"" g
 fi
 
 dbg grep -E '^#define (ZIG_|LLVM_)' "${cmake_build_dir}"/config.h
@@ -263,9 +267,9 @@ if is_linux; then
   ls -ld "${CONDA_BUILD_SYSROOT:-/nonexistent}"/{usr/lib,lib64,lib64/lp64d} 2>&1 | sed 's/^/[sysroot-layout] /' || true
 
   create_zig_linux_libc_file "${zig_build_dir}/libc_file"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/pthread_atfork_stub.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/pthread_atfork_stub.o\"" g
   create_pthread_atfork_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/libc_single_threaded_stub.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/libc_single_threaded_stub.o\"" g
   create_libc_single_threaded_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
 fi
 
