@@ -11,9 +11,6 @@ context:
 
   bootstrap_via_upstream: false
 
-  # Single switch; export derives from this. Set SKIP_LANGREF=1 to skip the ~2h langref build locally.
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" }}
-
   # Umbrella switch for long cross-build test legs; runs by default.
   skip_long_xbuild: ${{ env.get("SKIP_LONG_XBUILD", default="0") == "1" }}
 
@@ -157,6 +154,9 @@ context:
   is_cross_target: ${{ build_platform != target_platform and cross_target_platform_ == target_platform }}
   # x86_64 runs on the arm64 macOS runners via Rosetta 2; not symmetric.
   is_rosetta: ${{ build_platform == "osx-arm64" and target_platform == "osx-64" }}
+
+  # Single switch: also excludes lanes that cannot execute stage3 (see _can_run_stage3).
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" or ppc64le or riscv64 or not (is_native or linux or is_rosetta) }}
   is_testable: ${{ not (build_platform in ["osx-64", "win-64"] and target_platform in ["osx-arm64", "win-arm64"]) }}
 
   # C shims run where the package installs, so build them for target_platform
@@ -229,6 +229,7 @@ source:
           # Phase 0003: Linker Redirection (comprehensive GCC linker with full flag translation)
           - patches/ppc64le/0003-linker-redirect-link.zig.patch
           - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
+          - patches/ppc64le/0004-dl-iterate-phdr-no-pt-phdr-posix.zig.patch
           # Phase 0005-0006: CMake ppc64le configuration (mlongcall, lld bundle)
           - patches/cmake/0005-ppc64le-mlongcall-CMakeLists.txt.patch
           - patches/cmake/0006-ppc64le-lld-bundle-CMakeLists.txt.patch
@@ -412,7 +413,7 @@ outputs:
               then:
                 - zig-lld-bundle
           files:
-            - if: (is_native or linux) and not skip_langref
+            - if: not skip_langref
               then:
                 - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
@@ -484,6 +485,30 @@ outputs:
           recipe:
             - testing/_test_utils.py
             - testing/test_dtneeded.py
+      - script:
+          - if: linux and ppc64le
+            then:
+              - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
+              - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
+              - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
+              - python testing/test_dl_iterate_phdr.py ${{ conda_triplet }} ${{ zig_triplet }}
+            else:
+              - echo "SKIP dl_iterate_phdr PT_PHDR test (non-ppc64le)"
+        requirements:
+          build:
+            - python >=3.10
+            - if: build_platform != target_platform
+              then:
+                - ${{ qemu_pkg }}
+          run:
+            - if: linux
+              then:
+                - binutils_impl_${{ target_platform }}
+                - sysroot_${{ target_platform }} ${{ (c_stdlib_version ~ ".*") if target_platform == "linux-ppc64le" else (">=" ~ c_stdlib_version) }}
+        files:
+          recipe:
+            - testing/_test_utils.py
+            - testing/test_dl_iterate_phdr.py
       # Functional test using triplet-prefixed binary
       - script:
           interpreter: bash
