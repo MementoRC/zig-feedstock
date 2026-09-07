@@ -327,8 +327,8 @@ _can_run_stage3() {
 
 if [[ "${SKIP_LANGREF:-0}" == "1" ]]; then
   echo "INFO: Phase 2 langref skipped: SKIP_LANGREF=1 (local dev override)" >&2
-elif is_cross && is_linux; then
-  echo "INFO: Phase 2 langref skipped: emulated cross-linux lane; langref is built on native lanes only" >&2
+elif [[ "${target_platform}" != "linux-ppc64le" ]]; then
+  echo "INFO: Phase 2 langref skipped: temporarily ppc64le-only while validating the PT_PHDR fix" >&2
 elif _can_run_stage3; then
   dbg echo "=== PHASE 2: building langref via stage3 zig ==="
   _stage3_runner=()
