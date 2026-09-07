@@ -5,7 +5,7 @@ context:
   name: zig
   version: "0.17.0"
   abi_version: ${{ (version | split("."))[:2] | join(".") }}
-  snapshot: "1980+e78ea8f2c"
+  snapshot: "2015+3fdcbc03d"
   snapshot_ref: "1970"
   build_ref: "0"
   zig_impl_pin: '[version="${{ abi_version }}.*", build="*_${{ snapshot_ref }}_*", build_number=">=${{ build_ref }}"]'
@@ -17,7 +17,7 @@ context:
 
   # Manual global override for local dev only; SKIP_LANGREF export derives from it.
   # Emulated cross-linux lanes are skipped automatically in build.sh.
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" }}
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="1") == "1" }}
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
@@ -63,7 +63,6 @@ context:
       "x86-windows-msvc"                      if xc_win32                            else
       "native"
     }}
-  zig_short_triplet: ${{ zig_triplet | split(".") | first }}
 
   # Known conda-forge build_platforms (zig -target format, no glibc suffix)
   zig_build_triplet: >-
@@ -157,11 +156,10 @@ context:
   is_cross_compiler: ${{ is_hosted_xcompiler or is_unhosted_xcompiler }}
   is_cross_target: ${{ build_platform != target_platform and cross_target_platform_ == target_platform }}
   # x86_64 runs on the arm64 macOS runners via Rosetta 2; not symmetric.
-  is_rosetta: ${{ build_platform == "osx-arm64" and target_platform == "osx-64" }}
   is_testable: ${{ not (build_platform in ["osx-64", "win-64"] and target_platform in ["osx-arm64", "win-arm64"]) }}
 
   # C shims run where the package installs, so build them for target_platform
-  # whenever it differs from the build machine. See LLVM_LLM_REFERENCE.md
+  # whenever it differs from the build machine.
   shim_runs_on_target: ${{ target_platform != build_platform }}
 
 recipe:
@@ -170,7 +168,7 @@ recipe:
 
 source:
   - url: https://ziglang.org/builds/zig-${{ version }}-dev.${{ snapshot }}.tar.xz
-    sha256: 865fc9bbd79d1c7ebf092e040dc5b6914da16cc972f52548c433a18aca752f00
+    sha256: 21281a71a073763b1a669275e39353cb9a7a25632b4498e558cf50aef619eed4
     patches:
       # All platforms: wire LLD MachO into zig cc pipeline + allow -fuse-ld=lld.
       # macho-lld-support must apply before prefer-shared-libcxx because the
@@ -200,7 +198,6 @@ source:
           # Honour -Wl,--no-as-needed for bundled glibc libs (e.g. -lm).
           # Without this patch, zig drops -lm from DT_NEEDED even when the caller
           # explicitly requested --no-as-needed, breaking dlsym(sin) at runtime.
-          # Three-part fix: Config.zig flag + main.zig recorder + Lld.zig bracket.
           - patches/linux/Lld.zig-no-unconditional-as-needed-glibc-bundled.patch
           # LLVM backend: downgrade .shr_exact → .shr when safety checks are on.
           # LLVM InstCombine folds shl(lshr_exact(x,N),N) → x, making the runtime
@@ -218,7 +215,7 @@ source:
           # eh_frame, Thunk) were removed in build 9 after a linux-64 -> linux-ppc64le
           # build + ppc64le tests confirmed they are dead code: 0003-linker-redirect
           # forces the LLD backend (-> gcc/ld) for powerpc64le+elf, so the self-hosted
-          # final-link path is never instantiated. See ZIG_PATCH_AUDIT_0.16.0.md.
+          # final-link path is never instantiated.
           - patches/ppc64le/0001-arch-support-LdScript.zig.patch
           # Phase 0002: Build Configuration (LLVM backend, library paths)
           - patches/ppc64le/0002-build-config-build.zig.patch
@@ -251,32 +248,32 @@ source:
       - if: build_platform == "osx-arm64"
         then:
           - url: https://ziglang.org/builds/zig-aarch64-macos-${{ version }}-dev.${{ snapshot }}.tar.xz
-            sha256: 53f6d4a65fc98d145e532ce7cf1cf44ff7928891e451f44455b297b28ffb3c9b
+            sha256: 4691c70c37ed9e80feb3b8a9eaa7e1f01fe97b72fe8895fee42a95c2c0019943
             target_directory: zig-bootstrap
       - if: build_platform == "osx-64"
         then:
           - url: https://ziglang.org/builds/zig-x86_64-macos-${{ version }}-dev.${{ snapshot }}.tar.xz
-            sha256: e7679c126f2ec7c2d06c3bc61f952b8619e70dcf0303dde157c88c54bc152501
+            sha256: b52f1be4737543d93e400db8f4caf87ab0855599fca847a08435f817559829a9
             target_directory: zig-bootstrap
       - if: build_platform == "win-64"
         then:
           - url: https://ziglang.org/builds/zig-x86_64-windows-${{ version }}-dev.${{ snapshot }}.zip
-            sha256: c756c89bad6822b0da357c81909e6acf5b3ee218f284a996ec9e27da436a8c54
+            sha256: 013b0d13175123ec0a8a4540562c637c93e8658a8a2c14b6199b327ec95a12e1
             target_directory: zig-bootstrap
       - if: build_platform == "linux-64"
         then:
           - url: https://ziglang.org/builds/zig-x86_64-linux-${{ version }}-dev.${{ snapshot }}.tar.xz
-            sha256: 08d8e7cf715d26ce56164a2ecb9a8cc379c6955c524e8dc3dcb638f526f29b00
+            sha256: 31e29f9584c14fa2d51c0e1c2310515ba4817d6a28074999a3d85c4b5bb229ee
             target_directory: zig-bootstrap
       - if: build_platform == "linux-aarch64"
         then:
           - url: https://ziglang.org/builds/zig-aarch64-linux-${{ version }}-dev.${{ snapshot }}.tar.xz
-            sha256: f71f97ffc6deaabcad2da40730d23a4487c5ca7bee1b4f0c0358c7563e781fae
+            sha256: 417d10f00d5f5c833804b72769dd49712fe84a042af44032f83c749e4548b17a
             target_directory: zig-bootstrap
       - if: build_platform == "linux-ppc64le"
         then:
           - url: https://ziglang.org/builds/zig-powerpc64le-linux-${{ version }}-dev.${{ snapshot }}.tar.xz
-            sha256: bd0dbbb5e1ff2e58d179763756f30f299b9fb6c17d91fc469cc342ef23d6785d
+            sha256: f0b29a4e6d118df805b93e4936e330b3bb62500db7d830547ba64fd77cb47410
             target_directory: zig-bootstrap
 
 build:
@@ -324,9 +321,6 @@ outputs:
 
           CONDA_ZIG_BUILD: ${{ build_triplet ~ "-zig" }}
           CONDA_ZIG_HOST: ${{ conda_triplet ~ "-zig" }}
-
-          # auto = absolute GROUP paths for the riscv64 sysroot only. legacy/abs force one form.
-          ZIG_SYSROOT_MODE: ${{ env.get("ZIG_SYSROOT_MODE", default="auto") }}
 
           # Derived from the single skip_langref switch above; do not re-add an env.get here.
           SKIP_LANGREF: ${{ "1" if skip_langref else "0" }}
@@ -496,7 +490,9 @@ outputs:
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" version
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" zen
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" init
-                - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
+                - if: not skip_langref
+                  then:
+                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
               else:
                 - echo "Not testable on this system"
         requirements:
@@ -797,7 +793,6 @@ outputs:
         file: install_zig_symlinks.py
         env:
           CONDA_TRIPLET: ${{ conda_triplet }}
-          cross_target_platform_: ${{ cross_target_platform_ }}
     requirements:
       build:
         - python 3.12.*

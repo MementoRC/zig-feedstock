@@ -11,8 +11,6 @@ import sys
 from pathlib import Path
 
 def main():
-    print("=== Installing Zig Metapackage Symlinks ===")
-
     prefix = Path(os.environ.get("PREFIX", sys.prefix))
     target_triplet = os.environ.get("CONDA_TRIPLET")
     is_nonunix = "mingw32" in target_triplet
@@ -33,8 +31,6 @@ def main():
             create_nonunix_wrapper(bin_dir, link_name, target_name)
         else:
             create_unix_symlink(bin_dir, link_name, target_name)
-
-    print("=== Zig Metapackage Installation Complete ===")
 
 
 def create_unix_symlink(bin_dir: Path, link_name: str, target_name: str):
