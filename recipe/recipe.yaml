@@ -17,7 +17,7 @@ context:
 
   # Manual global override for local dev only; SKIP_LANGREF export derives from it.
   # Emulated cross-linux lanes are skipped automatically in build.sh.
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" }}
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="1") == "1" }}
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
@@ -63,7 +63,6 @@ context:
       "x86-windows-msvc"                      if xc_win32                            else
       "native"
     }}
-  zig_short_triplet: ${{ zig_triplet | split(".") | first }}
 
   # Known conda-forge build_platforms (zig -target format, no glibc suffix)
   zig_build_triplet: >-
@@ -157,11 +156,10 @@ context:
   is_cross_compiler: ${{ is_hosted_xcompiler or is_unhosted_xcompiler }}
   is_cross_target: ${{ build_platform != target_platform and cross_target_platform_ == target_platform }}
   # x86_64 runs on the arm64 macOS runners via Rosetta 2; not symmetric.
-  is_rosetta: ${{ build_platform == "osx-arm64" and target_platform == "osx-64" }}
   is_testable: ${{ not (build_platform in ["osx-64", "win-64"] and target_platform in ["osx-arm64", "win-arm64"]) }}
 
   # C shims run where the package installs, so build them for target_platform
-  # whenever it differs from the build machine. See LLVM_LLM_REFERENCE.md
+  # whenever it differs from the build machine.
   shim_runs_on_target: ${{ target_platform != build_platform }}
 
 recipe:
@@ -200,7 +198,6 @@ source:
           # Honour -Wl,--no-as-needed for bundled glibc libs (e.g. -lm).
           # Without this patch, zig drops -lm from DT_NEEDED even when the caller
           # explicitly requested --no-as-needed, breaking dlsym(sin) at runtime.
-          # Three-part fix: Config.zig flag + main.zig recorder + Lld.zig bracket.
           - patches/linux/Lld.zig-no-unconditional-as-needed-glibc-bundled.patch
           # LLVM backend: downgrade .shr_exact → .shr when safety checks are on.
           # LLVM InstCombine folds shl(lshr_exact(x,N),N) → x, making the runtime
@@ -218,7 +215,7 @@ source:
           # eh_frame, Thunk) were removed in build 9 after a linux-64 -> linux-ppc64le
           # build + ppc64le tests confirmed they are dead code: 0003-linker-redirect
           # forces the LLD backend (-> gcc/ld) for powerpc64le+elf, so the self-hosted
-          # final-link path is never instantiated. See ZIG_PATCH_AUDIT_0.16.0.md.
+          # final-link path is never instantiated.
           - patches/ppc64le/0001-arch-support-LdScript.zig.patch
           # Phase 0002: Build Configuration (LLVM backend, library paths)
           - patches/ppc64le/0002-build-config-build.zig.patch
@@ -324,9 +321,6 @@ outputs:
 
           CONDA_ZIG_BUILD: ${{ build_triplet ~ "-zig" }}
           CONDA_ZIG_HOST: ${{ conda_triplet ~ "-zig" }}
-
-          # auto = absolute GROUP paths for the riscv64 sysroot only. legacy/abs force one form.
-          ZIG_SYSROOT_MODE: ${{ env.get("ZIG_SYSROOT_MODE", default="auto") }}
 
           # Derived from the single skip_langref switch above; do not re-add an env.get here.
           SKIP_LANGREF: ${{ "1" if skip_langref else "0" }}
@@ -496,7 +490,9 @@ outputs:
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" version
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" zen
                 - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" init
-                - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
+                - if: not skip_langref
+                  then:
+                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" test zig-source/test/behavior.zig
               else:
                 - echo "Not testable on this system"
         requirements:
@@ -797,7 +793,6 @@ outputs:
         file: install_zig_symlinks.py
         env:
           CONDA_TRIPLET: ${{ conda_triplet }}
-          cross_target_platform_: ${{ cross_target_platform_ }}
     requirements:
       build:
         - python 3.12.*

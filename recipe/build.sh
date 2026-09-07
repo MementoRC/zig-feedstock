@@ -10,6 +10,7 @@ source "${RECIPE_DIR}/building/_bash_check.sh"
 # --- Functions ---
 
 source "${RECIPE_DIR}/building/_common.sh"
+source "${RECIPE_DIR}/building/_zig_diag.sh"
 source "${RECIPE_DIR}/building/_build.sh"  # configure_cmake_zigcpp, build_zig_with_zig
 
 # --- Early exits ---
@@ -92,10 +93,9 @@ if is_unix; then
 fi
 
 # --- ppc64le R_PPC64_REL24 mitigation (defense in depth) ---
-# Bundle approach: build libLLD and libzigcpp as separate .so files to split
-# the 24-bit branch relocation domain across multiple PLT sections.
-# Combined with cmake patch 0005 (-mlongcall via target_compile_options),
-# this prevents R_PPC64_REL24 overflow when linking the full zig2 binary.
+# Two mechanisms: -mlongcall via the CFLAGS/CXXFLAGS below, and the
+# libzig-lld-bundle.so split (cmake patch 0006 + _lld_bundle.sh) that spreads
+# the 24-bit branch relocation domain across separate PLT sections.
 if [[ "${target_platform}" == "linux-ppc64le" ]]; then
   export CFLAGS="${CFLAGS:-} -mlongcall -mcmodel=large -fno-partial-inlining -fno-ipa-cp-clone"
   export CXXFLAGS="${CXXFLAGS:-} -mlongcall -mcmodel=large -fno-partial-inlining -fno-ipa-cp-clone"
@@ -295,7 +295,8 @@ if [[ "${target_platform}" == "linux-ppc64le" ]] && is_cross && \
   echo "[build.sh] linux-ppc64le: two-stage bootstrap engaged — Stage 1 native build complete, using patched native zig as bootstrap: ${BUILD_ZIG}"
 fi
 
-if build_zig_with_zig "${zig_build_dir}" "${BUILD_ZIG}" "${PREFIX}"; then
+zig_diag_fingerprint
+if zig_diag_exec phase1-zig-build -- build_zig_with_zig "${zig_build_dir}" "${BUILD_ZIG}" "${PREFIX}"; then
   dbg echo "=== ZIG BUILD: SUCCESS ==="
 else
   echo "ERROR: zig-build failed." >&2
@@ -336,19 +337,25 @@ elif _can_run_stage3; then
   fi
 
   # Passthrough lets the emulated stage3 exec the build-arch cross-gcc natively (opt-in, off by default).
+  # rc is captured rather than handled inline so the END span prints before any exit.
+  zig_diag_span "BEGIN phase2-langref"
+  _langref_start=${SECONDS}
+  _langref_rc=0
   (
     cd "${cmake_source_dir}" &&
     env QEMU_EXECVE_NATIVE_PASSTHROUGH=1 "${_stage3_runner[@]+"${_stage3_runner[@]}"}" "${PREFIX}/bin/zig" build langref \
       --prefix "${PREFIX}" \
       -Dversion-string="${PKG_VERSION}" \
       -Ddoctest-target="${ZIG_TRIPLET}"
-  ) || {
+  ) || _langref_rc=$?
+  zig_diag_span "END phase2-langref: rc=${_langref_rc} elapsed=$((SECONDS - _langref_start))s"
+  if [[ ${_langref_rc} -ne 0 ]]; then
     if ! is_cross; then
       echo "ERROR: Phase 2 langref build failed (native build, expected to succeed)" >&2
       exit 1
     fi
     echo "WARNING: Phase 2 langref build failed (cross build, non-fatal)" >&2
-  }
+  fi
 else
   echo "INFO: Phase 2 langref skipped: cross build with no usable stage3 runner (need qemu on linux, wine on windows)" >&2
 fi
@@ -371,15 +378,11 @@ generate_mingw_import_libs
 # Strip Python bytecode caches from anywhere under PREFIX (was previously
 # scoped to lib/zig but rattler-build's strict-mode check fired on
 # lib/zig/lldb/__pycache__/pretty_printers.cpython-312.pyc even after a
-# narrower find ran — widening to ${PREFIX} as belt-and-braces, and adding
-# visible echo + -print output so we can confirm the find actually executes
-# on the next iteration. .pyc files are Python-version-locked
-# (cpython-312 tag), auto-regenerate on first import, and serve no purpose
-# in a shipped conda package.
-echo "[build.sh] Stripping __pycache__ dirs from ${PREFIX}..."
+# narrower find ran — widening to ${PREFIX} as belt-and-braces. .pyc files
+# are Python-version-locked (cpython-312 tag), auto-regenerate on first
+# import, and serve no purpose in a shipped conda package.
 if [[ -d "${PREFIX}" ]]; then
-    find "${PREFIX}" -type d -name __pycache__ -print -exec rm -rf {} + 2>&1 || true
-    echo "[build.sh] __pycache__ strip done"
+    find "${PREFIX}" -type d -name __pycache__ -exec rm -rf {} + 2>&1 || true
 else
     echo "[build.sh] WARNING: ${PREFIX} does not exist — find skipped"
 fi
