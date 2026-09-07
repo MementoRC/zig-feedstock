@@ -743,7 +743,7 @@ outputs:
 
       # Verify <triplet>-zig-windres wrapper: -o flag translation works
       - script:
-          - if: xc_w64
+          - if: xc_w64 or xc_warm64
             then:
               - python testing/test_windres.py
             else:
@@ -757,7 +757,7 @@ outputs:
 
       # Verify <triplet>-zig-cc wrapper: -Wl,-eSYM to -Wl,/ENTRY:SYM translation
       - script:
-          - if: xc_w64
+          - if: xc_w64 or xc_warm64
             then:
               - python testing/test_wl_entry_translation.py
             else:
