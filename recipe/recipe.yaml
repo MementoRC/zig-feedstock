@@ -759,7 +759,7 @@ outputs:
 
           # Verify <triplet>-zig-cc wrapper: -Wl,-eSYM to -Wl,/ENTRY:SYM translation
           - script:
-              - if: xc_w64 or xc_warm64
+              - if: xc_w64 or xc_warm64 or xc_win32
                 then:
                   - python testing/test_wl_entry_translation.py
                 else:

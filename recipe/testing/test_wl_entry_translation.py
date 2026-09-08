@@ -19,26 +19,44 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 def main() -> None:
-    # Discover the mingw zig-cc wrapper from PATH by trying known candidates
+    # Select the wrapper for THIS lane's target: honour CONDA_ZIG_HOST/ZIG_CC
+    # instead of a fixed-order PATH probe (that always picked x86_64 first).
     candidates = [
         "x86_64-w64-mingw32-zig-cc",
         "i686-w64-mingw32-zig-cc",
         "aarch64-w64-mingw32-zig-cc",
     ]
     zig_cc_exe = None
-    for candidate in candidates:
-        found = shutil.which(candidate)
+    selected_via = None
+
+    zig_cc_env = os.environ.get("ZIG_CC")
+    if zig_cc_env:
+        found = shutil.which(zig_cc_env) or (zig_cc_env if Path(zig_cc_env).is_file() else None)
         if found:
             zig_cc_exe = found
-            break
+            selected_via = "ZIG_CC"
+
+    if zig_cc_exe is None:
+        conda_zig_host = os.environ.get("CONDA_ZIG_HOST")
+        if conda_zig_host:
+            found = shutil.which(f"{conda_zig_host}-cc")
+            if found:
+                zig_cc_exe = found
+                selected_via = "CONDA_ZIG_HOST"
+
+    if zig_cc_exe is None:
+        for candidate in candidates:
+            found = shutil.which(candidate)
+            if found:
+                zig_cc_exe = found
+                selected_via = "candidate list fallback"
+                break
 
     if zig_cc_exe is None:
         sys.exit("FAIL: no <arch>-w64-mingw32-zig-cc wrapper found on PATH")
 
-    # The candidate list is ordered and the first hit wins, so a lane carrying
-    # several wrappers silently exercises only one. Name it, and name the rest.
     on_path = [c for c in candidates if shutil.which(c)]
-    print(f"INFO: using wrapper: {zig_cc_exe}")
+    print(f"INFO: using wrapper: {zig_cc_exe} (selected via {selected_via})")
     print(f"INFO: wrappers on PATH: {', '.join(on_path)}")
 
     # Minimal Windows C source with custom entry point
