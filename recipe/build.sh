@@ -226,8 +226,12 @@ fi
 # zstd (compression), libxml2. Needed on every native + cross linux
 # build — linux-aarch64 failed linking zig2 with undefined adler32
 # when this was gated on `is_cross`.
-is_linux && perl -pi -e "s@(ZIG_LLVM_LIBRARIES \".*)\"@\$1;-lzstd;-lxml2;-lz\"@" "${cmake_build_dir}"/config.h
-is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PREFIX}@" "${cmake_build_dir}"/config.h
+is_linux && _cfg_subst "${cmake_build_dir}/config.h" '(ZIG_LLVM_LIBRARIES ".*)"' '\1;-lzstd;-lxml2;-lz"'
+# Cross builds resolve LLVM on the build machine, so config.h's ZIG_LLVM_* paths
+# point into ${BUILD_PREFIX} — the wrong architecture. Windows needs the literal
+# form: CMake writes native paths (C:/… or C:\…), ${BUILD_PREFIX} is MSYS (/c/…).
+is_osx      && is_cross && _cfg_subst     "${cmake_build_dir}/config.h" "(ZIG_LLVM_\\w+ \")${BUILD_PREFIX}" "\\1${PREFIX}"
+is_not_unix && is_cross && _cfg_subst_lit "${cmake_build_dir}/config.h" "${BUILD_PREFIX}" "${PREFIX}"
 # Note: do NOT inject ${PREFIX}/lib/libc++.dylib into ZIG_LLVM_LIBRARIES on macOS.
 # build.zig sets mod.link_libcpp = true for darwin targets, which (via patches/
 # Lld.zig-prefer-shared-libcxx.patch) already resolves to ${PREFIX}/lib/libc++.1.dylib.
@@ -245,7 +249,7 @@ is_osx && is_cross &&   perl -pi -e "s@(ZIG_LLVM_\w+ \")${BUILD_PREFIX}@\$1${PRE
 if is_linux && [[ -n "${CONDA_BUILD_SYSROOT:-}" ]]; then
   source "${RECIPE_DIR}/building/_glibc217_syscall_stubs.sh"
   create_glibc217_syscall_stubs "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/glibc217_syscall_stubs.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/glibc217_syscall_stubs.o\"" g
 fi
 
 dbg grep -E '^#define (ZIG_|LLVM_)' "${cmake_build_dir}"/config.h
@@ -263,9 +267,9 @@ if is_linux; then
   ls -ld "${CONDA_BUILD_SYSROOT:-/nonexistent}"/{usr/lib,lib64,lib64/lp64d} 2>&1 | sed 's/^/[sysroot-layout] /' || true
 
   create_zig_linux_libc_file "${zig_build_dir}/libc_file"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/pthread_atfork_stub.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/pthread_atfork_stub.o\"" g
   create_pthread_atfork_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
-  perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${ZIG_LOCAL_CACHE_DIR}/libc_single_threaded_stub.o\"|g" "${cmake_build_dir}/config.h"
+  _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/libc_single_threaded_stub.o\"" g
   create_libc_single_threaded_stub "${CONDA_TRIPLET%%-*}" "${CC}" "${ZIG_LOCAL_CACHE_DIR}"
 fi
 
@@ -327,8 +331,8 @@ _can_run_stage3() {
 
 if [[ "${SKIP_LANGREF:-0}" == "1" ]]; then
   echo "INFO: Phase 2 langref skipped: SKIP_LANGREF=1 (local dev override)" >&2
-elif is_cross && is_linux; then
-  echo "INFO: Phase 2 langref skipped: emulated cross-linux lane; langref is built on native lanes only" >&2
+elif [[ "${target_platform}" != "linux-ppc64le" ]]; then
+  echo "INFO: Phase 2 langref skipped: temporarily ppc64le-only while validating the PT_PHDR fix" >&2
 elif _can_run_stage3; then
   dbg echo "=== PHASE 2: building langref via stage3 zig ==="
   _stage3_runner=()
@@ -361,6 +365,12 @@ else
 fi
 
 dbg echo "Post-install implementation package: ${PKG_NAME}"
+# DIAG: the pre-mv filename has never been captured in any CI log. win-64
+# native ends up with zig.exe, win-arm64 cross with an unsuffixed zig, from
+# this same mv on the same host and shell. This listing is the missing
+# measurement; remove it once the mechanism is settled.
+echo "DIAG pre-mv listing of \${PREFIX}/bin:"
+ls -la "${PREFIX}/bin/" || true
 mv "${PREFIX}"/bin/zig "${PREFIX}"/bin/"${CONDA_TRIPLET}"-zig
 
 # Non-unix conda convention: artifacts go under Library/
@@ -374,18 +384,6 @@ fi
 
 source "${RECIPE_DIR}/building/_mingw.sh"
 generate_mingw_import_libs
-
-# Strip Python bytecode caches from anywhere under PREFIX (was previously
-# scoped to lib/zig but rattler-build's strict-mode check fired on
-# lib/zig/lldb/__pycache__/pretty_printers.cpython-312.pyc even after a
-# narrower find ran — widening to ${PREFIX} as belt-and-braces. .pyc files
-# are Python-version-locked (cpython-312 tag), auto-regenerate on first
-# import, and serve no purpose in a shipped conda package.
-if [[ -d "${PREFIX}" ]]; then
-    find "${PREFIX}" -type d -name __pycache__ -exec rm -rf {} + 2>&1 || true
-else
-    echo "[build.sh] WARNING: ${PREFIX} does not exist — find skipped"
-fi
 
 # Build-time only gcc-lookup lever; must not ship.
 if [[ "${target_platform}" == "linux-ppc64le" ]]; then

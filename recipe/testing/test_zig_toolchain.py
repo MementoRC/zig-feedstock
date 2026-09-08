@@ -871,14 +871,32 @@ def test_mingw_prebuilt_import_libs() -> None:
         return
 
     if _build_is_win:
-        lib_common = _prefix / "Library" / "lib" / "zig" / "libc" / "mingw" / "lib-common"
+        _mingw_root = _prefix / "Library" / "lib" / "zig" / "libc" / "mingw"
     else:
-        lib_common = _prefix / "lib" / "zig" / "libc" / "mingw" / "lib-common"
+        _mingw_root = _prefix / "lib" / "zig" / "libc" / "mingw"
+
+    lib_common = _mingw_root / "lib-common"
+
+    # lib-common holds the x86_64 import libs and is first in the wrapper's
+    # library search path on every arch, so it is checked unconditionally.
+    # The arch-specific sibling is checked in addition when the target is not x86_64.
+    if "aarch64" in _triplet:
+        arch_dir = _mingw_root / "libarm64"
+    elif "i686" in _triplet or "x86-" in _triplet:
+        arch_dir = _mingw_root / "lib32"
+    else:
+        arch_dir = None
 
     if not lib_common.is_dir():
         FAIL("lib-common directory exists", str(lib_common))
         return
     PASS("lib-common directory exists")
+
+    if arch_dir is not None:
+        if arch_dir.is_dir():
+            PASS(f"{arch_dir.name} directory exists")
+        else:
+            FAIL(f"{arch_dir.name} directory exists", str(arch_dir))
 
     # Core Windows system libs — from .def.in templates (ws2_32, kernel32, ole32,
     # advapi32, user32) or plain .def (shlwapi, version, synchronization) or
@@ -894,13 +912,15 @@ def test_mingw_prebuilt_import_libs() -> None:
         "libshlwapi.a",      # plain .def — Shell lightweight API
         "libversion.a",      # plain .def — version info
     ]
-    for fname in required:
-        lib = lib_common / fname
-        if lib.exists() and lib.stat().st_size > 0:
-            PASS(f"pre-generated {fname}")
-        else:
-            FAIL(f"pre-generated {fname}",
-                 f"{lib} {'missing' if not lib.exists() else 'is empty (0 bytes)'}")
+    _check_dirs = [lib_common] if arch_dir is None else [lib_common, arch_dir]
+    for _d in _check_dirs:
+        for fname in required:
+            lib = _d / fname
+            if lib.exists() and lib.stat().st_size > 0:
+                PASS(f"pre-generated {_d.name}/{fname}")
+            else:
+                FAIL(f"pre-generated {_d.name}/{fname}",
+                     f"{lib} {'missing' if not lib.exists() else 'is empty (0 bytes)'}")
 
 
 # ===================================================================
