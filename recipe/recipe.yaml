@@ -339,7 +339,7 @@ outputs:
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
       python:
         skip_pyc_compilation:
-          - lib/zig/lldb/pretty_printers.py
+          - ${{ library }}lib/zig/lldb/pretty_printers.py
     requirements:
       build:
         # --- Common build deps (all cases) ---

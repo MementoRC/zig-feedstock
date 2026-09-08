@@ -379,18 +379,6 @@ fi
 source "${RECIPE_DIR}/building/_mingw.sh"
 generate_mingw_import_libs
 
-# Strip Python bytecode caches from anywhere under PREFIX (was previously
-# scoped to lib/zig but rattler-build's strict-mode check fired on
-# lib/zig/lldb/__pycache__/pretty_printers.cpython-312.pyc even after a
-# narrower find ran — widening to ${PREFIX} as belt-and-braces. .pyc files
-# are Python-version-locked (cpython-312 tag), auto-regenerate on first
-# import, and serve no purpose in a shipped conda package.
-if [[ -d "${PREFIX}" ]]; then
-    find "${PREFIX}" -type d -name __pycache__ -exec rm -rf {} + 2>&1 || true
-else
-    echo "[build.sh] WARNING: ${PREFIX} does not exist — find skipped"
-fi
-
 # Build-time only gcc-lookup lever; must not ship.
 if [[ "${target_platform}" == "linux-ppc64le" ]]; then
   rm -f "${PREFIX}/bin/powerpc64le-conda-linux-gnu-gcc"
