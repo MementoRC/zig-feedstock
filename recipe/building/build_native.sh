@@ -55,13 +55,13 @@ if [[ "${BUILD_NATIVE_STAGE1_ONLY:-0}" == "1" ]]; then
     ${CONDA_CMD} create -p "${ENV_DIR}" -c conda-forge -y \
         cmake ninja gcc gxx patchelf \
         "llvmdev=${LLVM_VER}.*" "clangdev=${LLVM_VER}.*" "libclang-cpp=${LLVM_VER}.*" "lld=${LLVM_VER}.*" \
-        libxml2-devel zlib zstd perl python \
+        libxml2-devel zlib zstd python \
         "sysroot_${build_platform:-linux-64}=2.17"
 else
     ${CONDA_CMD} create -p "${ENV_DIR}" -c conda-forge -y \
         cmake ninja gcc gxx patchelf \
         "llvmdev=${LLVM_VER}.*" "clangdev=${LLVM_VER}.*" "libclang-cpp=${LLVM_VER}.*" "lld=${LLVM_VER}.*" \
-        libxml2-devel zlib zstd perl python \
+        libxml2-devel zlib zstd python \
         "sysroot_${build_platform:-linux-64}=2.17" \
         "zig_impl_${build_platform:-linux-64}>=${PKG_VERSION}"
 fi
@@ -126,8 +126,7 @@ else
 fi
 NATIVE_CC=$(ls "${ENV_DIR}/bin/${_host_triple}-cc" 2>/dev/null || echo "${CC:-gcc}")
 create_pthread_atfork_stub "${_host_arch}" "${NATIVE_CC}" "${STUB_DIR}"
-perl -pi -e "s|(#define ZIG_LLVM_LIBRARIES \".*)\"|\$1;${STUB_DIR}/pthread_atfork_stub.o\"|g" \
-    "${CMAKE_BUILD}/config.h"
+_cfg_subst "${CMAKE_BUILD}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${STUB_DIR}/pthread_atfork_stub.o\"" g
 echo "[build_native] Injected pthread_atfork stub into config.h"
 
 # Rewrite sysroot ldscripts to relative form for zig's lld — AFTER all gcc/cmake steps, which need absolute paths.
