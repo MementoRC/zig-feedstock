@@ -19,6 +19,10 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+# Success-path verbose diagnostics (matrix + DIAG probes) are gated behind
+# DEBUG_ZIG_BUILD=1; failure-path output always prints unconditionally.
+DIAG = os.environ.get("DEBUG_ZIG_BUILD", "0") == "1"
+
 
 def _fail(zig_cc_exe: str, argv: list[str], result: subprocess.CompletedProcess[str], label: str) -> None:
     """Emit the full argv, untruncated stderr, and a -v re-run's link line, then exit."""
@@ -234,11 +238,13 @@ void OtherEntry(void) { ExitProcess(1); }
         # The first link of a run pays for compiling zig's mingw libc from
         # source; warm that cache with one unscored link before the matrix so
         # the first real matrix cell isn't the one that eats the compile cost.
-        print("INFO: cache-warm link (unscored) ...")
+        if DIAG:
+            print("INFO: cache-warm link (unscored) ...")
         warm = _run_link(tmpdir_path, "warm", ["-Wl,-eMyEntry"],
                          "warm", ["-Wl,--subsystem,console"],
                          "int main(void) { return 0; }\n")
-        print(f"INFO: cache-warm result: {warm[0]} {warm[1]}")
+        if DIAG:
+            print(f"INFO: cache-warm result: {warm[0]} {warm[1]}")
 
         # Full matrix: every variant against every entry form. No pruning —
         # the caller wants the whole picture in one CI pass.
@@ -266,218 +272,205 @@ void OtherEntry(void) { ExitProcess(1); }
         print("=== end failing-cell detail ===")
         sys.stdout.flush()
 
-        print("")
-        print("=== diagnostics ===")
+        if DIAG:
+            print("")
+            print("=== diagnostics ===")
 
-        # (a) wrapper identity
-        try:
-            wv = subprocess.run([zig_cc_exe, "-v"], capture_output=True, text=True,
-                                 check=False, timeout=60)
-            lines = (wv.stderr or "").splitlines()[:5]
-            print("DIAG wrapper identity (-v stderr, first 5 lines):")
-            for line in lines:
-                print(f"  {line}")
-        except Exception as exc:
-            print(f"DIAG wrapper identity: failed ({exc})")
+            # (a) wrapper identity
+            try:
+                wv = subprocess.run([zig_cc_exe, "-v"], capture_output=True, text=True,
+                                     check=False, timeout=60)
+                lines = (wv.stderr or "").splitlines()[:5]
+                print("DIAG wrapper identity (-v stderr, first 5 lines):")
+                for line in lines:
+                    print(f"  {line}")
+            except Exception as exc:
+                print(f"DIAG wrapper identity: failed ({exc})")
 
-        # (b) verbose link line for baseline and the nostartfiles cells --
-        # confirms whether crt2.o really left the link line under
-        # -nostartfiles, rather than assuming the driver honoured the flag.
-        try:
-            entry_flags = ENTRY_FORMS[0][1]
-            for diag_var_name in ("baseline", "nostartfiles", "nostartfiles_nosubsys"):
-                diag_variant = next(v for v in VARIANTS if v[0] == diag_var_name)
-                _dname, dextra, dsrc, _dstrict = diag_variant
-                c_file = tmpdir_path / f"diag_{diag_var_name}.c"
-                exe_file = tmpdir_path / f"diag_{diag_var_name}.exe"
-                c_file.write_text(c_source_base + dsrc)
-                argv = ([zig_cc_exe] + entry_flags + dextra +
+            # (b) verbose link line for baseline and the nostartfiles cells --
+            # confirms whether crt2.o really left the link line under
+            # -nostartfiles, rather than assuming the driver honoured the flag.
+            try:
+                entry_flags = ENTRY_FORMS[0][1]
+                for diag_var_name in ("baseline", "nostartfiles", "nostartfiles_nosubsys"):
+                    diag_variant = next(v for v in VARIANTS if v[0] == diag_var_name)
+                    _dname, dextra, dsrc, _dstrict = diag_variant
+                    c_file = tmpdir_path / f"diag_{diag_var_name}.c"
+                    exe_file = tmpdir_path / f"diag_{diag_var_name}.exe"
+                    c_file.write_text(c_source_base + dsrc)
+                    argv = ([zig_cc_exe] + entry_flags + dextra +
+                             [str(c_file), "-o", str(exe_file), "-v"])
+                    r = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=120)
+                    combined = (r.stdout or "") + (r.stderr or "")
+                    found_any = False
+                    for line in combined.splitlines():
+                        if "lld-link" in line:
+                            found_any = True
+                            print(f"DIAG lld-link line [{diag_var_name}]: {line[:2000]}")
+                    if not found_any:
+                        print(f"DIAG lld-link line [{diag_var_name}]: not found in verbose output")
+            except Exception as exc:
+                print(f"DIAG lld-link line: failed ({exc})")
+
+            # (b2) crt2.obj presence and symbol-table diagnostic: distinguishes
+            # whether crt2.obj is dropped from the link line (case 1), present but
+            # built without a `main` reference (case 2), or present and does
+            # reference `main` (case 3) -- cases 2 and 3 are indistinguishable from
+            # the command line alone, so the object's own symbol table must be
+            # inspected.
+            try:
+                baseline_variant = next(v for v in VARIANTS if v[0] == "baseline")
+                _bname, bextra, bsrc, _bstrict = baseline_variant
+                concat_flags = ENTRY_FORMS[0][1]
+                c_file = tmpdir_path / "diag_crt2.c"
+                exe_file = tmpdir_path / "diag_crt2.exe"
+                c_file.write_text(c_source_base + bsrc)
+                argv = ([zig_cc_exe] + concat_flags + bextra +
                          [str(c_file), "-o", str(exe_file), "-v"])
                 r = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=120)
                 combined = (r.stdout or "") + (r.stderr or "")
-                found_any = False
+
+                link_line = None
                 for line in combined.splitlines():
                     if "lld-link" in line:
-                        found_any = True
-                        print(f"DIAG lld-link line [{diag_var_name}]: {line[:2000]}")
-                if not found_any:
-                    print(f"DIAG lld-link line [{diag_var_name}]: not found in verbose output")
-        except Exception as exc:
-            print(f"DIAG lld-link line: failed ({exc})")
-
-        # (b2) crt2.obj presence and symbol-table diagnostic: distinguishes
-        # whether crt2.obj is dropped from the link line (case 1), present but
-        # built without a `main` reference (case 2), or present and does
-        # reference `main` (case 3) -- cases 2 and 3 are indistinguishable from
-        # the command line alone, so the object's own symbol table must be
-        # inspected.
-        try:
-            baseline_variant = next(v for v in VARIANTS if v[0] == "baseline")
-            _bname, bextra, bsrc, _bstrict = baseline_variant
-            concat_flags = ENTRY_FORMS[0][1]
-            c_file = tmpdir_path / "diag_crt2.c"
-            exe_file = tmpdir_path / "diag_crt2.exe"
-            c_file.write_text(c_source_base + bsrc)
-            argv = ([zig_cc_exe] + concat_flags + bextra +
-                     [str(c_file), "-o", str(exe_file), "-v"])
-            r = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=120)
-            combined = (r.stdout or "") + (r.stderr or "")
-
-            link_line = None
-            for line in combined.splitlines():
-                if "lld-link" in line:
-                    link_line = line
-                    break
-
-            crt2_token = None
-            if link_line is not None:
-                for token in link_line.split():
-                    if token.lower().endswith("crt2.obj"):
-                        crt2_token = token
+                        link_line = line
                         break
 
-            if crt2_token is None:
-                print("DIAG crt2.obj: ABSENT from link line "
-                      "(case 1 - driver places different objects per target)")
-            else:
-                print(f"DIAG crt2.obj path: {crt2_token}")
-                undefined = _coff_undefined_symbols(Path(crt2_token))
-                if undefined is None:
-                    print("DIAG crt2.obj: present, symbol table unreadable")
-                else:
-                    has_main = "main" in undefined
-                    has_main_decorated = "_main" in undefined
-                    print(f"DIAG crt2.obj undefined symbol count: {len(undefined)}")
-                    if has_main:
-                        print("DIAG crt2.obj references main: YES (as 'main')")
-                    elif has_main_decorated:
-                        print("DIAG crt2.obj references main: YES (as '_main')")
-                    else:
-                        print("DIAG crt2.obj references main: NO")
-                    if has_main or has_main_decorated:
-                        print("DIAG case 3: crt2.obj present AND references main - "
-                              "resolver unidentified")
-                    else:
-                        print("DIAG case 2: crt2.obj present but does NOT reference "
-                              "main - objects differ per target")
-                    print("DIAG crt2.obj undefined symbols (first 15):")
-                    for sym in sorted(undefined)[:15]:
-                        print(f"    {sym}")
-        except Exception as exc:
-            print(f"DIAG crt2 symbols: unavailable ({exc})")
+                crt2_token = None
+                if link_line is not None:
+                    for token in link_line.split():
+                        if token.lower().endswith("crt2.obj"):
+                            crt2_token = token
+                            break
 
-        # (c) libmingw32 member listing
-        try:
-            search_roots = [
-                Path(zig_cc_exe).parent,
-                Path(zig_cc_exe).parent.parent / "lib",
-                Path(zig_cc_exe).parent.parent / "lib" / "zig",
-            ]
-            archive_path = None
-            for root in search_roots:
-                try:
-                    if not root.is_dir():
+                if crt2_token is None:
+                    print("DIAG crt2.obj: ABSENT from link line "
+                          "(case 1 - driver places different objects per target)")
+                else:
+                    print(f"DIAG crt2.obj path: {crt2_token}")
+                    undefined = _coff_undefined_symbols(Path(crt2_token))
+                    if undefined is None:
+                        print("DIAG crt2.obj: present, symbol table unreadable")
+                    else:
+                        has_main = "main" in undefined
+                        has_main_decorated = "_main" in undefined
+                        print(f"DIAG crt2.obj undefined symbol count: {len(undefined)}")
+                        if has_main:
+                            print("DIAG crt2.obj references main: YES (as 'main')")
+                        elif has_main_decorated:
+                            print("DIAG crt2.obj references main: YES (as '_main')")
+                        else:
+                            print("DIAG crt2.obj references main: NO")
+                        if has_main or has_main_decorated:
+                            print("DIAG case 3: crt2.obj present AND references main - "
+                                  "resolver unidentified")
+                        else:
+                            print("DIAG case 2: crt2.obj present but does NOT reference "
+                                  "main - objects differ per target")
+                        print("DIAG crt2.obj undefined symbols (first 15):")
+                        for sym in sorted(undefined)[:15]:
+                            print(f"    {sym}")
+            except Exception as exc:
+                print(f"DIAG crt2 symbols: unavailable ({exc})")
+
+            # (c) libmingw32 member listing
+            try:
+                search_roots = [
+                    Path(zig_cc_exe).parent,
+                    Path(zig_cc_exe).parent.parent / "lib",
+                    Path(zig_cc_exe).parent.parent / "lib" / "zig",
+                ]
+                archive_path = None
+                for root in search_roots:
+                    try:
+                        if not root.is_dir():
+                            continue
+                        hits = list(root.rglob("libmingw32.lib")) + list(root.rglob("libmingw32.a"))
+                        if hits:
+                            archive_path = hits[0]
+                            break
+                    except Exception:
                         continue
-                    hits = list(root.rglob("libmingw32.lib")) + list(root.rglob("libmingw32.a"))
-                    if hits:
-                        archive_path = hits[0]
-                        break
-                except Exception:
-                    continue
-            if archive_path is None:
-                print("DIAG libmingw32: not located")
-            else:
-                candidate_ar = zig_cc_exe.replace("-zig-cc", "-zig-ar")
-                if Path(candidate_ar).is_file() or shutil.which(candidate_ar):
-                    ar_exe = candidate_ar
+                if archive_path is None:
+                    print("DIAG libmingw32: not located")
                 else:
-                    ar_exe = shutil.which("llvm-ar")
-                if ar_exe is None:
-                    print(f"DIAG libmingw32 members: archive found at {archive_path} "
-                          f"but no archiver available")
+                    candidate_ar = zig_cc_exe.replace("-zig-cc", "-zig-ar")
+                    if Path(candidate_ar).is_file() or shutil.which(candidate_ar):
+                        ar_exe = candidate_ar
+                    else:
+                        ar_exe = shutil.which("llvm-ar")
+                    if ar_exe is None:
+                        print(f"DIAG libmingw32 members: archive found at {archive_path} "
+                              f"but no archiver available")
+                    else:
+                        ar_result = subprocess.run([ar_exe, "t", str(archive_path)],
+                                                    capture_output=True, text=True,
+                                                    check=False, timeout=60)
+                        members = [m for m in (ar_result.stdout or "").splitlines() if m.strip()]
+                        has_crtexewin = any("crtexewin" in m for m in members)
+                        has_crtexe = any("crtexe" in m and "crtexewin" not in m for m in members)
+                        print(f"DIAG libmingw32 members: archive={archive_path} "
+                              f"count={len(members)} crtexewin={has_crtexewin} crtexe={has_crtexe}")
+            except Exception as exc:
+                print(f"DIAG libmingw32 members: failed ({exc})")
+
+            # (d) PE entry-point check: proves -Wl,-e SELECTS a named symbol (not
+            # merely tolerated) by linking the same TU with two different entry
+            # symbols and comparing the resulting AddressOfEntryPoint values.
+            try:
+                with_main_variant = next(v for v in VARIANTS if v[0] == "with_main")
+                _wname, wextra, wsrc, _wstrict = with_main_variant
+                c_file = tmpdir_path / "diag_entry.c"
+                c_file.write_text(c_source_base + wsrc)
+
+                exe_myentry = tmpdir_path / "diag_entry_myentry.exe"
+                argv_myentry = ([zig_cc_exe, "-Wl,-eMyEntry"] + wextra +
+                                [str(c_file), "-o", str(exe_myentry)])
+                subprocess.run(argv_myentry, capture_output=True, text=True, check=False, timeout=60)
+
+                exe_otherentry = tmpdir_path / "diag_entry_otherentry.exe"
+                argv_otherentry = ([zig_cc_exe, "-Wl,-eOtherEntry"] + wextra +
+                                   [str(c_file), "-o", str(exe_otherentry)])
+                subprocess.run(argv_otherentry, capture_output=True, text=True, check=False, timeout=60)
+
+                exe_otherentry_long = tmpdir_path / "diag_entry_otherentry_long.exe"
+                argv_otherentry_long = ([zig_cc_exe, "-Wl,--entry,OtherEntry"] + wextra +
+                                        [str(c_file), "-o", str(exe_otherentry_long)])
+                subprocess.run(argv_otherentry_long, capture_output=True, text=True, check=False, timeout=60)
+
+                rva_myentry = _pe_entry_rva(exe_myentry) if exe_myentry.is_file() else None
+                rva_otherentry = _pe_entry_rva(exe_otherentry) if exe_otherentry.is_file() else None
+                rva_otherentry_long = _pe_entry_rva(exe_otherentry_long) if exe_otherentry_long.is_file() else None
+
+                print(f"DIAG entry RVA (-Wl,-eMyEntry):        "
+                      f"{hex(rva_myentry) if rva_myentry is not None else 'unavailable'}")
+                print(f"DIAG entry RVA (-Wl,-eOtherEntry):     "
+                      f"{hex(rva_otherentry) if rva_otherentry is not None else 'unavailable'}")
+                print(f"DIAG entry RVA (-Wl,--entry,OtherEntry): "
+                      f"{hex(rva_otherentry_long) if rva_otherentry_long is not None else 'unavailable'}")
+
+                if rva_myentry is not None and rva_otherentry is not None:
+                    if rva_myentry != rva_otherentry:
+                        print("DIAG entry flag SELECTS the named symbol (RVAs differ)")
+                    else:
+                        print("DIAG entry flag IGNORED (identical RVA for two different symbols)")
                 else:
-                    ar_result = subprocess.run([ar_exe, "t", str(archive_path)],
-                                                capture_output=True, text=True,
-                                                check=False, timeout=60)
-                    members = [m for m in (ar_result.stdout or "").splitlines() if m.strip()]
-                    has_crtexewin = any("crtexewin" in m for m in members)
-                    has_crtexe = any("crtexe" in m and "crtexewin" not in m for m in members)
-                    print(f"DIAG libmingw32 members: archive={archive_path} "
-                          f"count={len(members)} crtexewin={has_crtexewin} crtexe={has_crtexe}")
-        except Exception as exc:
-            print(f"DIAG libmingw32 members: failed ({exc})")
+                    print("DIAG entry RVA: unavailable")
 
-        # (d) PE entry-point check: proves -Wl,-e SELECTS a named symbol (not
-        # merely tolerated) by linking the same TU with two different entry
-        # symbols and comparing the resulting AddressOfEntryPoint values.
-        try:
-            with_main_variant = next(v for v in VARIANTS if v[0] == "with_main")
-            _wname, wextra, wsrc, _wstrict = with_main_variant
-            c_file = tmpdir_path / "diag_entry.c"
-            c_file.write_text(c_source_base + wsrc)
-
-            exe_myentry = tmpdir_path / "diag_entry_myentry.exe"
-            argv_myentry = ([zig_cc_exe, "-Wl,-eMyEntry"] + wextra +
-                            [str(c_file), "-o", str(exe_myentry)])
-            subprocess.run(argv_myentry, capture_output=True, text=True, check=False, timeout=60)
-
-            exe_otherentry = tmpdir_path / "diag_entry_otherentry.exe"
-            argv_otherentry = ([zig_cc_exe, "-Wl,-eOtherEntry"] + wextra +
-                               [str(c_file), "-o", str(exe_otherentry)])
-            subprocess.run(argv_otherentry, capture_output=True, text=True, check=False, timeout=60)
-
-            exe_otherentry_long = tmpdir_path / "diag_entry_otherentry_long.exe"
-            argv_otherentry_long = ([zig_cc_exe, "-Wl,--entry,OtherEntry"] + wextra +
-                                    [str(c_file), "-o", str(exe_otherentry_long)])
-            subprocess.run(argv_otherentry_long, capture_output=True, text=True, check=False, timeout=60)
-
-            rva_myentry = _pe_entry_rva(exe_myentry) if exe_myentry.is_file() else None
-            rva_otherentry = _pe_entry_rva(exe_otherentry) if exe_otherentry.is_file() else None
-            rva_otherentry_long = _pe_entry_rva(exe_otherentry_long) if exe_otherentry_long.is_file() else None
-
-            print(f"DIAG entry RVA (-Wl,-eMyEntry):        "
-                  f"{hex(rva_myentry) if rva_myentry is not None else 'unavailable'}")
-            print(f"DIAG entry RVA (-Wl,-eOtherEntry):     "
-                  f"{hex(rva_otherentry) if rva_otherentry is not None else 'unavailable'}")
-            print(f"DIAG entry RVA (-Wl,--entry,OtherEntry): "
-                  f"{hex(rva_otherentry_long) if rva_otherentry_long is not None else 'unavailable'}")
-
-            if rva_myentry is not None and rva_otherentry is not None:
-                if rva_myentry != rva_otherentry:
-                    print("DIAG entry flag SELECTS the named symbol (RVAs differ)")
+                if rva_otherentry_long is not None and rva_otherentry is not None:
+                    if rva_otherentry_long == rva_otherentry:
+                        print("DIAG long form and short form agree")
+                    else:
+                        print("DIAG SHORT FORM DROPPED: long form selects a different entry than -e")
                 else:
-                    print("DIAG entry flag IGNORED (identical RVA for two different symbols)")
-            else:
-                print("DIAG entry RVA: unavailable")
+                    print("DIAG long form RVA: unavailable")
+            except Exception as exc:
+                print(f"DIAG entry RVA: failed ({exc})")
 
-            if rva_otherentry_long is not None and rva_otherentry is not None:
-                if rva_otherentry_long == rva_otherentry:
-                    print("DIAG long form and short form agree")
-                else:
-                    print("DIAG SHORT FORM DROPPED: long form selects a different entry than -e")
-            else:
-                print("DIAG long form RVA: unavailable")
-        except Exception as exc:
-            print(f"DIAG entry RVA: failed ({exc})")
-
-        print("=== end diagnostics ===")
-        print("")
+            print("=== end diagnostics ===")
+            print("")
 
     strictness = {v[0]: v[3] for v in VARIANTS}
-    print("")
-    print("=== -Wl,-e translation fail-over matrix ===")
-    print(f"wrapper: {zig_cc_exe}")
-    for form_name, _flags in ENTRY_FORMS:
-        for var_name, _e, _s, _st in VARIANTS:
-            key = (form_name, var_name)
-            if key not in results:
-                continue
-            status, detail, _stderr_text = results[key]
-            kind = "strict" if strictness[var_name] else "weak"
-            print(f"  {form_name:7s} {var_name:22s} [{kind:6s}] {status:7s} {detail}")
-    print("=== end matrix ===")
-    sys.stdout.flush()
-    print("")
 
     linked_both = [
         v[0] for v in VARIANTS
@@ -486,6 +479,24 @@ void OtherEntry(void) { ExitProcess(1); }
     ]
     strict_ok = [name for name in linked_both if strictness[name]]
     weak_ok = [name for name in linked_both if not strictness[name]]
+
+    # Success-path matrix is DIAG-gated; on failure it always prints since it
+    # is the primary evidence for the FAIL verdict below.
+    if DIAG or not (strict_ok or weak_ok):
+        print("")
+        print("=== -Wl,-e translation fail-over matrix ===")
+        print(f"wrapper: {zig_cc_exe}")
+        for form_name, _flags in ENTRY_FORMS:
+            for var_name, _e, _s, _st in VARIANTS:
+                key = (form_name, var_name)
+                if key not in results:
+                    continue
+                status, detail, _stderr_text = results[key]
+                kind = "strict" if strictness[var_name] else "weak"
+                print(f"  {form_name:7s} {var_name:22s} [{kind:6s}] {status:7s} {detail}")
+        print("=== end matrix ===")
+        sys.stdout.flush()
+        print("")
 
     if strict_ok:
         print(f"PASS: [{zig_cc_exe}] -Wl,-eSYM and -Wl,-e,SYM honoured; "
