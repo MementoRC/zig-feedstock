@@ -436,4 +436,14 @@ fi
 source "${RECIPE_DIR}/building/_mingw.sh"
 generate_mingw_import_libs
 
+# rattler-build lints mixed .txt/.TXT in info/licenses; two-step mv also works
+# on the case-insensitive filesystems of the osx and win lanes.
+for _lic_dir in libcxx libcxxabi libunwind; do
+  _lic="${SRC_DIR}/zig-source/lib/${_lic_dir}/LICENSE.TXT"
+  [[ -f "${_lic}" ]] || continue
+  mv "${_lic}" "${_lic}.tmp" && mv "${_lic}.tmp" "${_lic%.TXT}.txt" \
+    || echo "WARNING: could not lowercase ${_lic}" >&2
+done
+unset _lic_dir _lic
+
 dbg echo "=== Build installed for package: ${PKG_NAME} ==="
