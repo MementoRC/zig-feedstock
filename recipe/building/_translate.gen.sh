@@ -53,7 +53,7 @@ _zig_translate_flags() {
             ;;
         -print-file-name=*)
             _name="${_a#-print-file-name=}"
-            for _dir in "${_tr_conda_prefix}/lib/zig-llvm/lib" "${_tr_conda_prefix}/lib"; do
+            for _dir in "${_tr_conda_prefix}/lib"; do
                 if [[ -e "${_dir}/${_name}" ]]; then
                     echo "${_dir}/${_name}"
                     exit 0

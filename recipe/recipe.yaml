@@ -298,7 +298,6 @@ outputs:
         rpath_allowlist:
           - if: osx
             then:
-              - "@loader_path/../lib/zig-llvm/lib"
               - "@loader_path/../lib"
         missing_dso_allowlist:
           - if: osx
@@ -393,10 +392,6 @@ outputs:
           - if: linux and not ppc64le
             then:
               - libxml2-16
-          - if: not unix
-            then:
-              - ucrt
-              - vc14_runtime
     tests:
       # Package contents verification - impl has triplet-prefixed binary
       - package_contents:
@@ -923,9 +918,9 @@ about:
   license_file:
     - zig-source/LICENSE
     - building/mingw-defs/DISCLAIMER.PD
-    - zig-source/lib/libcxx/LICENSE.TXT
-    - zig-source/lib/libcxxabi/LICENSE.TXT
-    - zig-source/lib/libunwind/LICENSE.TXT
+    - zig-source/lib/libcxx/LICENSE.[Tt][Xx][Tt]
+    - zig-source/lib/libcxxabi/LICENSE.[Tt][Xx][Tt]
+    - zig-source/lib/libunwind/LICENSE.[Tt][Xx][Tt]
     - zig-source/lib/libc/glibc/LICENSES
     - zig-source/lib/libc/mingw/COPYING
     - zig-source/lib/libc/musl/COPYRIGHT

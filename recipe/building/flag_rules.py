@@ -207,7 +207,6 @@ PROFILE_DATA: dict[str, dict] = {
             "*": "{zig_lib}/libc/mingw/lib-x86_64",
         },
         print_file_name_probe_dirs=[
-            "{conda_prefix}/lib/zig-llvm/lib",
             "{conda_prefix}/lib",
         ],
     ),
@@ -227,7 +226,6 @@ PROFILE_DATA: dict[str, dict] = {
             "*": "{zig_lib}\\libc\\mingw\\lib-x86_64",
         },
         print_file_name_probe_dirs=[
-            "{conda_prefix}\\Library\\lib\\zig-llvm\\lib",
             "{conda_prefix}\\Library\\lib",
         ],
     ),
