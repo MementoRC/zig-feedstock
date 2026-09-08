@@ -56,9 +56,11 @@ def create_nonunix_wrapper(bin_dir: Path, link_name: str, target_name: str):
     """Create a NonUnix batch wrapper."""
     prefix = bin_dir.parent.parent  # Library/bin -> Library -> PREFIX
 
-    # zig_impl ships the main binary as .exe on win-64 but unsuffixed on
-    # win-arm64 (same build.sh mv, different shell .exe handling). Probe
-    # both, .exe first, and remember which spelling actually exists.
+    # zig_impl ships the main binary as .exe for the win-64 NATIVE target but
+    # unsuffixed for the win-arm64 CROSS target. NOT a shell difference: both
+    # lanes run build=win-64 with identical m2-msys2-runtime, and build.sh's
+    # mv is byte-identical. Mechanism unconfirmed — the pre-mv filename has
+    # never been captured. Probe both spellings, .exe first.
     candidates = [
         (bin_dir / f"{target_name}.exe", ".exe", "Library/bin"),
         (bin_dir / target_name, "", "Library/bin"),
