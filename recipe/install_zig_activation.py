@@ -365,6 +365,11 @@ def install_zig_cc_wrappers(
     # Strip glibc version for cc/c++ target (clang rejects ".2.17" suffix)
     # llvm.zig-triple-no-glibc-version.patch stops it reaching LLVM's triple.
     cc_target = zig_triplet
+    # Windows: the wrappers must target the mingw (gnu) ABI whose CRT this
+    # recipe builds and ships. zig_triplet carries the msvc spelling because
+    # it also sets -DZIG_TARGET_TRIPLE for the zig_impl build itself, where
+    # msvc is correct. Only the wrapper's compile target is rewritten here.
+    cc_target = cc_target.replace("-windows-msvc", "-windows-gnu")
     zig_bin = _find_zig_bin(conda_triplet, is_nonunix=is_nonunix)
 
     # Architecture prefix for sysroot detection (e.g. x86_64 from x86_64-linux-gnu.2.17)
