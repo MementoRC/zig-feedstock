@@ -11,9 +11,6 @@ context:
 
   bootstrap_via_upstream: false
 
-  # Umbrella switch for long cross-build test legs; runs by default.
-  skip_long_xbuild: ${{ env.get("SKIP_LONG_XBUILD", default="0") == "1" }}
-
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
   xc_aarch64:    ${{ cross_target_platform_ == "linux-aarch64" }}
@@ -59,7 +56,6 @@ context:
       "x86-windows-msvc"                      if xc_win32                            else
       "native"
     }}
-  zig_short_triplet: ${{ zig_triplet | split(".") | first }}
 
   # Known conda-forge build_platforms (zig -target format, no glibc suffix)
   zig_build_triplet: >-
@@ -334,7 +330,6 @@ outputs:
 
           # Derived from the single skip_langref switch above; do not re-add an env.get here.
           SKIP_LANGREF: ${{ "1" if skip_langref else "0" }}
-          SKIP_LONG_XBUILD: ${{ "1" if skip_long_xbuild else "0" }}
 
           # Local debug switch.
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
@@ -513,7 +508,7 @@ outputs:
       - script:
           interpreter: bash
           content:
-            - if: is_testable and not skip_long_xbuild
+            - if: is_testable
               then:
                 - export ZIG_GLOBAL_CACHE_DIR="${HOME:-${TMPDIR:-/tmp}}/.local/share/zig/zig-cache"
                 - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
@@ -655,12 +650,14 @@ outputs:
       build:
         - python 3.12.*
         - llvm-tools ${{ llvm_version }}.*  # llvm-objdump asserts CPU baseline
+        - if: unix
+          then:
+            - ${{ stdlib('c') }}
         - if: is_cross_compiler or is_cross_target
           then:
             - zig_impl_${{ build_platform }} ${{ abi_version }}.*
             - if: ppc64le
               then:
-                - ${{ stdlib('c') }}
                 - binutils_impl_${{ cross_target_platform_ }} >=2.45
                 - gcc_impl_${{ cross_target_platform_ }} >=14.3
       host:
@@ -842,7 +839,6 @@ outputs:
         file: install_zig_symlinks.py
         env:
           CONDA_TRIPLET: ${{ conda_triplet }}
-          cross_target_platform_: ${{ cross_target_platform_ }}
     requirements:
       build:
         - python 3.12.*
