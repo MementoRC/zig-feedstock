@@ -114,8 +114,8 @@ fi
 # Combined with cmake patch 0005 (-mlongcall via target_compile_options),
 # this prevents R_PPC64_REL24 overflow when linking the full zig2 binary.
 if [[ "${target_platform}" == "linux-ppc64le" ]]; then
-  export CFLAGS="${CFLAGS:-} -mlongcall -mcmodel=large -fno-partial-inlining -fno-ipa-cp-clone"
-  export CXXFLAGS="${CXXFLAGS:-} -mlongcall -mcmodel=large -fno-partial-inlining -fno-ipa-cp-clone"
+  export CFLAGS="${CFLAGS:-} -fno-partial-inlining -fno-ipa-cp-clone"
+  export CXXFLAGS="${CXXFLAGS:-} -fno-partial-inlining -fno-ipa-cp-clone"
   export LDFLAGS="${LDFLAGS:-} -Wl,--stub-group-size=0"
   export NINJA_FLAGS="-v"
   EXTRA_CMAKE_ARGS+=(
