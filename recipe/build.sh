@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# brush 0.4.0 (#1245): xtrace clobbers $?, breaking set -e. Keep it off.
+set +x
 IFS=$'\n\t'
 
 export build_platform="${build_platform:-${target_platform}}"
@@ -47,8 +49,8 @@ fi
 source "${RECIPE_DIR}/building/_upstream_bootstrap.sh"
 setup_upstream_zig_bootstrap
 
-# Bootstrap zig runs on the build machine — always use CONDA_ZIG_BUILD
-BUILD_ZIG="${CONDA_ZIG_BUILD}"
+# Bootstrap zig: upstream-bootstrap path if set, else CONDA_ZIG_BUILD
+BUILD_ZIG="${ZIG_BOOTSTRAP_EXE:-${CONDA_ZIG_BUILD}}"
 
 export CMAKE_BUILD_PARALLEL_LEVEL="${CPU_COUNT}"
 export CMAKE_GENERATOR=Ninja
@@ -141,6 +143,7 @@ if is_osx; then
   )
   EXTRA_ZIG_ARGS+=(--maxrss 8589934592)
 else
+  : # brush 0.4.0 $? guard
   EXTRA_CMAKE_ARGS+=(-DZIG_SYSTEM_LIBCXX=stdc++)
   # --maxrss + the build.zig max_rss patch are linux-only.  Adding
   # them to osx (commit 22a8ddb) capped zig's build-graph scheduler
@@ -160,6 +163,7 @@ if is_not_unix; then
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
   )
 else
+  : # brush 0.4.0 $? guard
   EXTRA_CMAKE_ARGS+=(-DZIG_SHARED_LLVM=ON)
 fi
 
@@ -199,7 +203,10 @@ if is_linux; then
   source "${RECIPE_DIR}/building/_libc_tuning.sh"
   create_gcc14_glibc28_compat_lib
 
-  is_cross && rm "${PREFIX}"/bin/llvm-config && cp "${BUILD_PREFIX}"/bin/llvm-config "${PREFIX}"/bin/llvm-config
+  if is_cross; then
+    rm "${PREFIX}"/bin/llvm-config
+    cp "${BUILD_PREFIX}"/bin/llvm-config "${PREFIX}"/bin/llvm-config
+  fi
 fi
 
 if is_osx && is_cross; then
@@ -265,7 +272,9 @@ if is_linux; then
   # Fix sysroot libc.so linker scripts 2.17 to use relative paths
   fix_sysroot_libc_scripts "${BUILD_PREFIX}"
 
-  ls -ld "${CONDA_BUILD_SYSROOT:-/nonexistent}"/{usr/lib,lib64,lib64/lp64d} 2>&1 | sed 's/^/[sysroot-layout] /' || true
+  for _sysroot_probe in usr/lib lib64 lib64/lp64d; do
+    ls -ld "${CONDA_BUILD_SYSROOT:-/nonexistent}/${_sysroot_probe}" 2>&1 | sed 's/^/[sysroot-layout] /' || true
+  done
 
   create_zig_linux_libc_file "${zig_build_dir}/libc_file"
   _cfg_subst "${cmake_build_dir}/config.h" '(#define ZIG_LLVM_LIBRARIES ".*)"' "\\1;${ZIG_LOCAL_CACHE_DIR}/pthread_atfork_stub.o\"" g
@@ -366,15 +375,24 @@ else
 fi
 
 dbg echo "Post-install implementation package: ${PKG_NAME}"
-mv "${PREFIX}"/bin/zig "${PREFIX}"/bin/"${CONDA_TRIPLET}"-zig
+# Name Windows executables explicitly: MSYS's implicit .exe handling is not
+# reliable for an ARM64 PE produced by an x64 cross-build.
+_zig_exe_suffix=""
+is_not_unix && _zig_exe_suffix=".exe"
+mv "${PREFIX}/bin/zig${_zig_exe_suffix}" "${PREFIX}/bin/${CONDA_TRIPLET}-zig${_zig_exe_suffix}"
 
 # Non-unix conda convention: artifacts go under Library/
 if is_not_unix; then
   dbg echo "Relocating to Library/ for non-unix conda convention"
   mkdir -p "${PREFIX}/Library/bin" "${PREFIX}/Library/lib" "${PREFIX}/Library/doc"
-  mv "${PREFIX}"/bin/"${CONDA_TRIPLET}"-zig "${PREFIX}"/Library/bin/"${CONDA_TRIPLET}"-zig
+  mv "${PREFIX}/bin/${CONDA_TRIPLET}-zig.exe" "${PREFIX}/Library/bin/${CONDA_TRIPLET}-zig.exe"
   mv "${PREFIX}"/lib/zig "${PREFIX}"/Library/lib/zig
-  [[ -d "${PREFIX}/doc" ]] && mv "${PREFIX}"/doc/* "${PREFIX}"/Library/doc/
+  if [[ -d "${PREFIX}/doc" ]]; then
+    _doc_entries=("${PREFIX}"/doc/*)
+    if [[ -e "${_doc_entries[0]}" ]]; then
+      mv "${PREFIX}"/doc/* "${PREFIX}"/Library/doc/
+    fi
+  fi
 fi
 
 source "${RECIPE_DIR}/building/_mingw.sh"

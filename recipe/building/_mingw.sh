@@ -16,6 +16,7 @@ function generate_mingw_import_libs() {
   if is_not_unix; then
     _zig_lib="${PREFIX}/Library/lib/zig"
   else
+    : # brush 0.4.0 $? guard
     _zig_lib="${PREFIX}/lib/zig"
   fi
   _mingw_common="${_zig_lib}/libc/mingw/lib-common"
@@ -78,6 +79,7 @@ SYNCHRONIZATION_DEF
     if is_not_unix; then
       _fresh_zig_bin="${PREFIX}/Library/bin/${CONDA_TRIPLET}-zig"
     else
+      : # brush 0.4.0 $? guard
       _fresh_zig_bin="${PREFIX}/bin/${CONDA_TRIPLET}-zig"
     fi
     if [[ -x "${_fresh_zig_bin}" ]] && "${_fresh_zig_bin}" version >/dev/null 2>&1; then
@@ -89,11 +91,13 @@ SYNCHRONIZATION_DEF
         echo "WARN: mingw CRT cache-warm links will be SLOW under emulation; this is expected, NOT a hang."
       fi
     else
+      : # brush 0.4.0 $? guard
       _zig_bin="$(command -v "${BUILD_ZIG}" 2>/dev/null || true)"
       if [[ -z "${_zig_bin}" ]]; then
         if is_not_unix; then
           _zig_bin="${BUILD_PREFIX}/Library/bin/${BUILD_ZIG}"
         else
+          : # brush 0.4.0 $? guard
           _zig_bin="${BUILD_PREFIX}/bin/${BUILD_ZIG}"
         fi
       fi
@@ -163,7 +167,9 @@ SYNCHRONIZATION_DEF
           if [[ "${_il_line}" == LIBRARY* ]]; then
             local -a _il_fields
             read -r -a _il_fields <<< "${_il_line}"
-            dll="${_il_fields[1]//\"/}"
+            if [[ ${#_il_fields[@]} -ge 2 ]]; then
+              dll="${_il_fields[1]//\"/}"
+            fi
             break
           fi
         done < "${def}"
@@ -171,6 +177,7 @@ SYNCHRONIZATION_DEF
         if "${_dlltool}" -m "${_dlltool_machine}" -D "${dll}" -d "${def}" -l "${lib}" 2>/dev/null && [[ -s "${lib}" ]]; then
           _gen_count=$(( _gen_count + 1 ))
         else
+          : # brush 0.4.0 $? guard
           _gen_fail=$(( _gen_fail + 1 ))
           _gen_failed="${_gen_failed} ${_dlltool_machine}:${stem}"
           rm -f "${lib}"
@@ -229,9 +236,13 @@ SYNCHRONIZATION_DEF
         for _def_in in "${_mingw_common}"/*.def.in; do
           [[ -f "${_def_in}" ]] || continue
           _stem="$(basename "${_def_in%.def.in}")"
-          _is_helper_stem "${_stem}" && continue
+          if _is_helper_stem "${_stem}"; then
+            continue
+          fi
           _lib="${_ia_outdir}/lib${_stem}.a"
-          [[ -f "${_lib}" ]] && continue
+          if [[ -f "${_lib}" ]]; then
+            continue
+          fi
           _def="${_ia_outdir}/${_stem}.def"
           if [[ ! -f "${_def}" ]]; then
             "${_zig_bin}" cc -E -P \
@@ -254,6 +265,7 @@ SYNCHRONIZATION_DEF
             "${_ar_cmd[@]}" rcs "${_uuid_lib}" "${_uuid_obj}" 2>/dev/null && [[ -s "${_uuid_lib}" ]]; then
             _gen_count=$(( _gen_count + 1 ))
           else
+            : # brush 0.4.0 $? guard
             _gen_fail=$(( _gen_fail + 1 ))
             _gen_failed="${_gen_failed} ${_ia_arch}:uuid"
             rm -f "${_uuid_lib}"
@@ -275,9 +287,13 @@ SYNCHRONIZATION_DEF
           for _supp_in in "${_supp_defs}"/*.def.in; do
             [[ -f "${_supp_in}" ]] || continue
             _supp_stem="$(basename "${_supp_in%.def.in}")"
-            _is_helper_stem "${_supp_stem}" && continue
+            if _is_helper_stem "${_supp_stem}"; then
+              continue
+            fi
             _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
-            [[ -f "${_supp_lib}" ]] && continue
+            if [[ -f "${_supp_lib}" ]]; then
+              continue
+            fi
             _supp_def="${_ia_outdir}/${_supp_stem}.def"
             if [[ ! -f "${_supp_def}" ]]; then
               "${_zig_bin}" cc -E -P \
@@ -294,7 +310,9 @@ SYNCHRONIZATION_DEF
           for _supp_def in "${_supp_defs}"/*.def; do
             [[ -f "${_supp_def}" ]] || continue
             _supp_stem="$(basename "${_supp_def%.def}")"
-            _is_helper_stem "${_supp_stem}" && continue
+            if _is_helper_stem "${_supp_stem}"; then
+              continue
+            fi
             _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
             [[ -f "${_supp_lib}" ]] && continue
             _gen_implib "${_supp_stem}" "${_supp_def}" "${_ia_outdir}"
@@ -338,7 +356,7 @@ SYNCHRONIZATION_DEF
       # prints log to stderr and returns 1 to abort import-lib generation.
       _compile_crt_obj() {
         local src="$1" obj="$2" extra="${3:-}"
-        local log; log=$(mktemp)
+        local log="${obj}.log"
         # shellcheck disable=SC2086
         if "${_zig_bin}" cc "${_crt_flags[@]}" ${extra} "${src}" -o "${obj}" >"${log}" 2>&1; then
           dbg cat "${log}"
@@ -381,6 +399,7 @@ SYNCHRONIZATION_DEF
             _stub_rel_warned=1
           fi
         else
+          : # brush 0.4.0 $? guard
           stub_mode="empty"
         fi
         if [[ "${stub_mode}" == "empty" ]]; then
@@ -525,6 +544,10 @@ SYNCHRONIZATION_DEF
       local _warm_dir
       _warm_dir="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/zig-warm-$$")"
       mkdir -p "${_warm_dir}"
+      # Normalize to a native path so MSYS argv translation to zig.exe agrees.
+      if command -v cygpath >/dev/null 2>&1; then
+        _warm_dir="$(cygpath -m "${_warm_dir}")"
+      fi
       cat > "${_warm_dir}/warm.c" <<'WARM_EOF'
 #include <stdio.h>
 #include <pthread.h>
@@ -624,6 +647,7 @@ WARM_EOF
       dbg echo "=== Stub archive generation done ==="
 
     else
+      : # brush 0.4.0 $? guard
       _mingw_skip_reason=""
       if [[ -z "${_dlltool}" ]]; then
         _mingw_skip_reason="${_mingw_skip_reason}dlltool not found; "

@@ -136,7 +136,9 @@ function prepare_sysroot_script_fallback() {
 
     # Skip vars that are unset
     _orig="${!_var-__UNSET__}"
-    [[ "${_orig}" == "__UNSET__" ]] && continue
+    if [[ "${_orig}" == "__UNSET__" ]]; then
+      continue
+    fi
 
     _updated="${_orig//$_old/$_new}"
     if [[ "${_updated}" != "${_orig}" ]]; then

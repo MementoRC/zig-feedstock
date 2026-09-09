@@ -12,6 +12,7 @@
  */
 
 #include "nonunix_common.h"
+#include "nonunix_spawn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,7 +84,7 @@ int main(int argc, char *argv[]) {
     restore_msys2_system32_path();
 
     /* Execute zig rc */
-    int ret = (int)_spawnv(_P_WAIT, zig_path, new_argv);
+    int ret = zig_spawn_wait(zig_path, (const char *const *)new_argv);
 
     if (ret == -1) {
         fprintf(stderr, "ERROR: zig-windres: failed to exec %s: %s\n",

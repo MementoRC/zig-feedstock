@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# brush 0.4.0 (#1245): xtrace clobbers $?, breaking set -e. Keep it off.
+set +x
 IFS=$'\n\t'
 
 if [[ ${BASH_VERSINFO[0]} -lt 5 || (${BASH_VERSINFO[0]} -eq 5 && ${BASH_VERSINFO[1]} -lt 2) ]]; then
@@ -93,6 +95,7 @@ if [[ "${BUILD_NATIVE_STAGE1_ONLY:-0}" == "1" ]]; then
     echo "[build_native] Bootstrap zig (upstream tarball): ${ZIG_BIN}"
     echo "[build_native] Using zig-lib-dir: ${SRC_DIR}/zig-bootstrap/lib"
 else
+    : # brush 0.4.0 $? guard
     # Conda-installed zig_impl provides the bootstrap binary
     ZIG_BIN=$(ls "${ENV_DIR}"/bin/*-zig 2>/dev/null | head -1)
     if [[ -z "${ZIG_BIN}" ]]; then

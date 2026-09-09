@@ -7,7 +7,7 @@ context:
   abi_version: ${{ (version | split("."))[:2] | join(".") }}
   snapshot: "2085+5e36170b5"
   snapshot_ref: "2056"
-  build_ref: "0"
+  build_ref: "1"
   zig_impl_pin: '[version="${{ abi_version }}.*", build="*_${{ snapshot_ref }}_*", build_number=">=${{ build_ref }}"]'
 
   llvm_src_version: "22.1.6"
@@ -352,7 +352,7 @@ outputs:
         - cmake >=3.5
         - llvm-tools ${{ llvm_version }}.*
         - ninja
-        - python 3.12.*
+        - python >=3.10
         - if: not unix and not arm64
           then:
             - ${{ m2 }}coreutils
@@ -413,6 +413,9 @@ outputs:
               then:
                 - zig-lld-bundle
           files:
+            - if: not unix
+              then:
+                - Library/bin/${{ conda_triplet }}-zig.exe
             - if: not skip_langref
               then:
                 - ${{ library }}doc/langref.html
@@ -507,9 +510,7 @@ outputs:
                 - echo "Not testable on this system"
         requirements:
           build:
-            - if: not unix
-              then:
-                - brush
+            - brush
             - if: build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
@@ -543,20 +544,20 @@ outputs:
                 - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
                 - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
                 - _zig="${PREFIX}"/${{ library }}bin/${{ conda_triplet }}"-zig"${{ exe }}
-                - echo 'int main(void){return 0;}' > /tmp/test_lld.c
+                - echo 'int main(void){return 0;}' > test_lld.c
                 - if: osx
                   then:
-                    - echo '_main' > /tmp/test_lld.exp
-                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -Wl,-exported_symbols_list,/tmp/test_lld.exp -o /tmp/test_lld /tmp/test_lld.c
+                    - echo '_main' > test_lld.exp
+                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -Wl,-exported_symbols_list,test_lld.exp -o test_lld test_lld.c
                     - echo "PASS -fuse-ld=lld with -exported_symbols_list (macOS/Mach-O via LLD)"
                 - if: linux
                   then:
-                    - echo '{ main; };' > /tmp/test_lld.dyn
-                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" cc -Wno-unused-command-line-argument -fuse-ld=lld -Wl,--dynamic-list=/tmp/test_lld.dyn -o /tmp/test_lld /tmp/test_lld.c
+                    - echo '{ main; };' > test_lld.dyn
+                    - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" cc -Wno-unused-command-line-argument -fuse-ld=lld -Wl,--dynamic-list=test_lld.dyn -o test_lld test_lld.c
                     - echo "PASS -fuse-ld=lld with --dynamic-list (Linux/ELF)"
                 - if: not unix
                   then:
-                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -mconsole -o /tmp/test_lld.exe /tmp/test_lld.c && /tmp/test_lld.exe
+                    - ${{ conda_triplet }}-zig cc -fuse-ld=lld -mconsole -o test_lld.exe test_lld.c && ./test_lld.exe
                     - echo "PASS -fuse-ld=lld compile+link+run (NonUnix/COFF)"
               else:
                 # LLD lacks ppc64le relocation support; wrapper guard tested via
@@ -605,6 +606,7 @@ outputs:
           CONDA_TRIPLET: ${{ conda_triplet }}
           CROSS_COMPILER: ${{ is_cross_compiler }}
           SHIM_RUNS_ON_TARGET: ${{ shim_runs_on_target }}
+          SHIM_ZIG_TRIPLET: ${{ zig_target_triplet }}
           NATIVE_TRIPLET: ${{ xc_build_triplet }}
           NATIVE_ZIG_TRIPLET: ${{ xc_build_zig_triplet }}
           # Zig toolchain identification (independent of gcc TOOLCHAIN)
@@ -615,7 +617,7 @@ outputs:
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
     requirements:
       build:
-        - python 3.12.*
+        - python >=3.10
         - llvm-tools ${{ llvm_version }}.*  # llvm-objdump asserts CPU baseline
         - if: is_cross_compiler or is_cross_target
           then:
@@ -771,6 +773,24 @@ outputs:
             requirements:
               build:
                 - python >=3.10
+
+          # Shim target selection is pure logic; the guarded .c sources must be
+          # copied or _compile_c_shim is skipped and the count assertion misfires.
+          - script:
+              - python testing/test_nonunix_shim_target.py
+            files:
+              recipe:
+                - testing/test_nonunix_shim_target.py
+                - install_zig_activation.py
+                - scripts/activate.bat
+                - scripts/deactivate.bat
+                - building/zig-cc-nonunix.c
+                - building/zig-tool-nonunix.c
+                - building/zig-windres-nonunix.c
+                - building/cross-zig-shim.c
+            requirements:
+              build:
+                - python >=3.10
           # Golden/characterization parity tests for the zig-cc wrapper flag
           - script:
               - python testing/test_flag_translation_parity.py
@@ -808,7 +828,7 @@ outputs:
           CONDA_TRIPLET: ${{ conda_triplet }}
     requirements:
       build:
-        - python 3.12.*
+        - python >=3.10
         - brush
       host:
         # Host dep ensures targets exist during build for symlink validation

@@ -89,6 +89,9 @@ PROBE_SUBDIRS = [
     "../../lib",               # fallback: standard lib dir
 ]
 
+# Optional until the zig-llvm package ships; matched by name, not position.
+OPTIONAL_PROBE_SUBDIR = "../../lib/zig-llvm/lib"
+
 # Platform-specific shared library names (mirrors sharedLibCxxNames)
 LIBCXX_NAMES: dict[str, list[str]] = {
     "linux": ["libc++.so.1", "libc++.so"],
@@ -237,10 +240,13 @@ def test_libcxx_fallback_static() -> None:
             SKIP("libcxx-static-fallback", "unknown output format")
             return
 
+        # Cold Windows libc++ compilation can exceed two minutes; keep a
+        # bounded allowance for building it before assessing static fallback.
+        compile_timeout = 600 if _build_is_win else 120
         r = _run([zig, "c++", "-shared", "-o", str(out), str(src)],
-                 cwd=td, timeout=120, target=_conda_triplet)
+                 cwd=td, timeout=compile_timeout, target=_conda_triplet)
         if r.stderr == "TIMEOUT":
-            WARN("libcxx-static-fallback", "timed out (120s)")
+            WARN("libcxx-static-fallback", f"timed out ({compile_timeout}s)")
             return
         if r.returncode != 0:
             FAIL("libcxx-static-fallback: compile C++ shared lib",
@@ -338,10 +344,10 @@ def test_libcxx_probe_paths() -> None:
         label = str(resolved.relative_to(_prefix)) if resolved.is_relative_to(_prefix) else str(resolved)
         if resolved.is_dir():
             PASS(f"probe dir exists: {label}")
+        elif subdir == OPTIONAL_PROBE_SUBDIR:
+            SKIP("optional zig-llvm probe directory", f"{label} is absent")
         else:
-            # zig-llvm/lib/ won't exist until zig-llvm package ships, that's OK
-            WARN(f"probe dir missing: {label}",
-                 "expected until zig-llvm package available")
+            WARN(f"probe dir missing: {label}", "standard library directory absent")
 
     # --- Diagnostic: check if patch 0008 is compiled into the binary ---
     if zig:
