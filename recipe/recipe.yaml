@@ -347,18 +347,18 @@ outputs:
         - ${{ compiler('c') }}
         - ${{ compiler('cxx') }}
         - ${{ stdlib("c") }}
-        - ${{ m2 }}file
+        # - ${{ m2 }}file
         - brush
         - cmake >=3.5
         - llvm-tools ${{ llvm_version }}.*
         - ninja
         - python 3.12.*
-        - if: not unix
+        - if: not unix and not arm64
           then:
             - ${{ m2 }}coreutils
             - ${{ m2 }}findutils
             - ${{ m2 }}gawk
-            - ${{ m2 }}which
+            # - ${{ m2 }}which
         - if: (build_platform != target_platform)
           then:
             - llvmdev ${{ llvm_version }}.*  # llvm-config
