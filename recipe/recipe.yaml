@@ -6,7 +6,7 @@ context:
   version: "0.17.0"
   abi_version: ${{ (version | split("."))[:2] | join(".") }}
   snapshot: "2085+5e36170b5"
-  snapshot_ref: "1970"
+  snapshot_ref: "2056"
   build_ref: "0"
   zig_impl_pin: '[version="${{ abi_version }}.*", build="*_${{ snapshot_ref }}_*", build_number=">=${{ build_ref }}"]'
 
