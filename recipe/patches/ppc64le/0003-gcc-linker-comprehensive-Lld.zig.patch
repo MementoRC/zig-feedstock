@@ -1,8 +1,9 @@
-# Purpose: Intercept ppc64le ELF final links in Lld.zig::elfLink and invoke GCC linker instead of LLD
+# Purpose: Unconditionally redirect ppc64le ELF final links in Lld.zig::elfLink to the GCC driver instead of LLD
 # Affects: src/link/Lld.zig
 # Upstream: TBD
-# Drop-when: Upstream LLD gains full PowerPC64 ELF relocation support (R_PPC64_REL24, TOC, etc.)
-# Last-verified: 2026-06-01
+# Rationale-status: UNVERIFIED. Sole source of "LLD lacks ppc64le relocation support" is our own zig-cc-unix.c wrapper string, matched by test_zig_toolchain.py to skip LLD tests; no captured LLD/zig error backs it.
+# Drop-when: A build variant with this patch excluded shows LLD linking ppc64le successfully in CI
+# Last-verified: 2026-09-09 (verified the self-sealing wrapper/test-skip structure only, not the underlying LLD-relocation claim)
 
 diff --git a/src/link/Lld.zig b/src/link/Lld.zig
 --- a/src/link/Lld.zig

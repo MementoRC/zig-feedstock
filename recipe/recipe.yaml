@@ -445,14 +445,14 @@ outputs:
             - testing/test_libcxx_shared.py
       # Regression test: -Wl,--no-as-needed -lm must put libm in DT_NEEDED.
       - script:
-          - if: linux and not ppc64le
+          - if: linux
             then:
               - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
               - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
               - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
               - python testing/test_dtneeded.py ${{ conda_triplet }} ${{ zig_triplet }}
             else:
-              - echo "SKIP DT_NEEDED test (non-linux or ppc64le)"
+              - echo "SKIP DT_NEEDED test (non-linux)"
         requirements:
           build:
             - python >=3.10
@@ -578,9 +578,15 @@ outputs:
                 - echo "PASS -fuse-ld=lld with -exported_symbols_list (macOS/Mach-O via LLD)"
             - if: ppc64le and linux
               then:
-                # LLD lacks ppc64le relocation support; wrapper guard tested via
-                # test_zig_toolchain.py (activation package). Raw binary has no wrapper.
-                - echo "Skip -fuse-ld=lld test on ppc64le (no wrapper in zig_impl_)"
+                # ppc64le links go through the GCC redirect in production, not LLD.
+                # This tests that link path; -fuse-ld=lld is intentionally not used.
+                - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
+                - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
+                - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
+                - _zig="${PREFIX}/bin/${{ conda_triplet }}-zig"
+                - ${QEMU_EXECVE:+"${QEMU_EXECVE}"} "${_zig}" cc -Wno-unused-command-line-argument -o "$t/test_lld" "$t/test_lld.c"
+                - test -f "$t/test_lld"
+                - echo "PASS link via GCC redirect (ppc64le, no LLD)"
         requirements:
           build:
             - ${{ m2 }}bash >=5.2

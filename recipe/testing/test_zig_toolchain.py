@@ -286,6 +286,10 @@ def test_flag_filtering() -> None:
             # macOS/Windows: tested via zig_impl recipe tests with platform-appropriate flags
             if is_ppc64le_target:
                 # ppc64le: LLD lacks relocation support -- verify wrapper blocks it
+                # WARNING: asserts OUR wrapper's guard behavior, not LLD itself.
+                # If the ppc64le guard in zig-cc-unix.c is ever removed, retire
+                # or invert this assertion in the same change, or a resulting
+                # FAIL will be misread as evidence the guard was needed.
                 r_block = _run([zig_cc, "-fuse-ld=lld", "-o", "/dev/null",
                                 str(main_src)], cwd=td, timeout=30)
                 if r_block.returncode != 0 and "not supported on ppc64le" in r_block.stderr:
