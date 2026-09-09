@@ -22,8 +22,13 @@ function setup_upstream_zig_bootstrap() {
     return 0
   fi
 
-  local _bootstrap_root
-  _bootstrap_root="$(find "${SRC_DIR}/zig-bootstrap" -maxdepth 1 -type d -name 'zig-*' -print -quit)"
+  local _bootstrap_root="" _cand
+  for _cand in "${SRC_DIR}/zig-bootstrap"/zig-*/; do
+    if [[ -d "${_cand}" ]]; then
+      _bootstrap_root="${_cand%/}"
+      break
+    fi
+  done
   if [[ -z "${_bootstrap_root}" ]]; then
     return 0
   fi

@@ -158,8 +158,15 @@ SYNCHRONIZATION_DEF
         local stem="$1" def="$2" outdir="$3"
         local lib="${outdir}/lib${stem}.a"
         [[ -f "${lib}" ]] && return 0
-        local dll
-        dll="$(awk '/^LIBRARY/{gsub(/"/, "", $2); print $2; exit}' "${def}")"
+        local dll="" _il_line
+        while IFS= read -r _il_line || [[ -n "${_il_line}" ]]; do
+          if [[ "${_il_line}" == LIBRARY* ]]; then
+            local -a _il_fields
+            read -r -a _il_fields <<< "${_il_line}"
+            dll="${_il_fields[1]//\"/}"
+            break
+          fi
+        done < "${def}"
         [[ -z "${dll}" ]] && dll="${stem}.dll"
         if "${_dlltool}" -m "${_dlltool_machine}" -D "${dll}" -d "${def}" -l "${lib}" 2>/dev/null && [[ -s "${lib}" ]]; then
           _gen_count=$(( _gen_count + 1 ))
@@ -536,6 +543,26 @@ WARM_EOF
       local _warm_failed_count=0
       local _warm_failed_list=""
 
+      # Recursive basename search (find removed). Silent on missing/empty
+      # dir, same tolerance as the old `find ... 2>/dev/null`.
+      function _find_by_basename() {
+        local dir="$1" name="$2" entry found
+        for entry in "${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do
+          [[ -e "${entry}" ]] || continue
+          if [[ -d "${entry}" ]]; then
+            found="$(_find_by_basename "${entry}" "${name}")"
+            if [[ -n "${found}" ]]; then
+              printf '%s\n' "${found}"
+              return 0
+            fi
+          elif [[ "${entry##*/}" == "${name}" ]]; then
+            printf '%s\n' "${entry}"
+            return 0
+          fi
+        done
+        return 1
+      }
+
       # Map: zig target triple -> staging dir name under lib/libc/mingw/
       for _warm_pair in \
           "x86_64-windows-gnu:${_mingw_common}" \
@@ -560,7 +587,7 @@ WARM_EOF
           fi
 
           local _warm_lib
-          _warm_lib="$(find "${_warm_cache}" -name 'libmingw32.lib' -print -quit 2>/dev/null)"
+          _warm_lib="$(_find_by_basename "${_warm_cache}" 'libmingw32.lib')"
           if [[ -z "${_warm_lib}" || ! -f "${_warm_lib}" ]]; then
               echo "ERROR: libmingw32.lib not found in cache for ${_warm_tgt}; CRT archives will be missing" >&2
               _warm_failed_count=$((_warm_failed_count + 1))

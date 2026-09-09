@@ -488,7 +488,7 @@ outputs:
             - testing/test_dtneeded.py
       # Functional test using triplet-prefixed binary
       - script:
-          interpreter: bash
+          interpreter: brush
           content:
             - if: is_testable
               then:
@@ -509,7 +509,7 @@ outputs:
           build:
             - if: not unix
               then:
-                - ${{ m2 }}bash >=5.2
+                - brush
             - if: build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
@@ -534,7 +534,7 @@ outputs:
       # Verify -fuse-ld=lld patch: zig cc must honor -fuse-ld=lld and pass
       # unrecognized linker args to LLD instead of rejecting them (Linux/ELF + NonUnix/COFF, not macOS/Mach-O).
       - script:
-          interpreter: bash
+          interpreter: brush
           content:
             - if: is_testable and not ppc64le
               then:
@@ -564,7 +564,7 @@ outputs:
                 - echo "Skip -fuse-ld=lld test on ppc64le (no wrapper in zig_impl_)"
         requirements:
           build:
-            - ${{ m2 }}bash >=5.2
+            - brush
             - if: build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
@@ -809,6 +809,7 @@ outputs:
     requirements:
       build:
         - python 3.12.*
+        - brush
       host:
         # Host dep ensures targets exist during build for symlink validation
         - ${{ pin_subpackage("zig_" ~ cross_target_platform_, exact=True) }}
@@ -822,7 +823,7 @@ outputs:
           bin:
             - zig
       - script:
-          interpreter: bash
+          interpreter: brush
           content:
             - if: is_testable
               then:
@@ -835,7 +836,7 @@ outputs:
                 - echo "Not testable on this system"
         requirements:
           build:
-            - ${{ m2 }}bash >=5.2
+            - brush
             - if: linux and build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
@@ -854,6 +855,8 @@ outputs:
       skip: cross_target_platform_ != target_platform
       script: echo "zig-compiler metapackage"
     requirements:
+      build:
+        - brush
       run:
         - ${{ pin_subpackage("zig", exact=True) }}
         - if: osx
@@ -862,7 +865,7 @@ outputs:
             - llvm-tools ${{ llvm_version }}.*
     tests:
       - script:
-          interpreter: bash
+          interpreter: brush
           content:
             - if: is_testable
               then:
@@ -875,7 +878,7 @@ outputs:
                 - echo "Not testable on this system"
         requirements:
           build:
-            - ${{ m2 }}bash >=5.2
+            - brush
             - if: linux and build_platform != target_platform
               then:
                 - ${{ qemu_pkg }}
