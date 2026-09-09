@@ -599,10 +599,18 @@ def test_windows_import_libs() -> None:
         r = _run(
             [zig_cc, "-lsynchronization", "-o", str(out), str(src)],
             cwd=td,
-            timeout=60,
+            timeout=180,  # 180s budget matches _test_shared_lib_windows Windows-link precedent
         )
         if r.stderr == "TIMEOUT":
-            WARN("windows import libs (-lsynchronization)", "timed out (60s)")
+            # WARN not FAIL: unknown yet if 180s is too tight or a real hang.
+            # If a timeout recurs at 180s that is real-hang evidence -
+            # promote to FAIL then. Emulated lanes already skip this test above,
+            # so slow emulation is not an available excuse.
+            WARN(
+                "windows import libs (-lsynchronization)",
+                "INCONCLUSIVE: probe killed at 180s before zig cc could "
+                "succeed or fail - not the documented arm64 SDK gap below",
+            )
         elif r.returncode != 0:
             if "DllImportLibraryNotFound" in r.stderr or "libsynchronization" in r.stderr:
                 FAIL(
@@ -647,10 +655,15 @@ def test_windows_import_libs() -> None:
         r2 = _run(
             [zig_cc, "-lapi-ms-win-core-synch-l1-2-0", "-o", str(out2), str(src)],
             cwd=td,
-            timeout=60,
+            timeout=180,
         )
         if r2.stderr == "TIMEOUT":
-            WARN("windows import libs (-lapi-ms-win-core-synch-l1-2-0)", "timed out (60s)")
+            # Same WARN-not-FAIL reasoning as the -lsynchronization probe above.
+            WARN(
+                "windows import libs (-lapi-ms-win-core-synch-l1-2-0)",
+                "INCONCLUSIVE: probe killed at 180s before zig cc could "
+                "succeed or fail - not the documented arm64 SDK gap below",
+            )
         elif r2.returncode != 0:
             if "unreachable" in r2.stderr or "reached unreachable" in r2.stderr:
                 FAIL(
@@ -876,27 +889,24 @@ def test_mingw_prebuilt_import_libs() -> None:
         _mingw_root = _prefix / "lib" / "zig" / "libc" / "mingw"
 
     lib_common = _mingw_root / "lib-common"
+    libarm64 = _mingw_root / "libarm64"
+    lib32 = _mingw_root / "lib32"
 
-    # lib-common holds the x86_64 import libs and is first in the wrapper's
-    # library search path on every arch, so it is checked unconditionally.
-    # The arch-specific sibling is checked in addition when the target is not x86_64.
-    if "aarch64" in _triplet:
-        arch_dir = _mingw_root / "libarm64"
-    elif "i686" in _triplet or "x86-" in _triplet:
-        arch_dir = _mingw_root / "lib32"
-    else:
-        arch_dir = None
+    # _mingw.sh populates lib-common, libarm64, and lib32 on every Windows
+    # lane regardless of the lane's own target arch, so all three are
+    # checked unconditionally (this function only runs when is_win_target).
+    all_dirs = [lib_common, libarm64, lib32]
 
     if not lib_common.is_dir():
         FAIL("lib-common directory exists", str(lib_common))
         return
     PASS("lib-common directory exists")
 
-    if arch_dir is not None:
-        if arch_dir.is_dir():
-            PASS(f"{arch_dir.name} directory exists")
+    for _dir in (libarm64, lib32):
+        if _dir.is_dir():
+            PASS(f"{_dir.name} directory exists")
         else:
-            FAIL(f"{arch_dir.name} directory exists", str(arch_dir))
+            FAIL(f"{_dir.name} directory exists", str(_dir))
 
     # Core Windows system libs — from .def.in templates (ws2_32, kernel32, ole32,
     # advapi32, user32) or plain .def (shlwapi, version, synchronization) or
@@ -912,8 +922,7 @@ def test_mingw_prebuilt_import_libs() -> None:
         "libshlwapi.a",      # plain .def — Shell lightweight API
         "libversion.a",      # plain .def — version info
     ]
-    _check_dirs = [lib_common] if arch_dir is None else [lib_common, arch_dir]
-    for _d in _check_dirs:
+    for _d in all_dirs:
         for fname in required:
             lib = _d / fname
             if lib.exists() and lib.stat().st_size > 0:

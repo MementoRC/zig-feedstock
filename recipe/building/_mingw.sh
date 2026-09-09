@@ -139,6 +139,16 @@ SYNCHRONIZATION_DEF
       _gen_fail=0
       _gen_failed=""
 
+      # Stems that are macro-fragment include helpers (not standalone DLL
+      # defs); zig ships these in its own mingw lib dir and dlltool cannot
+      # produce import libs from them. See PR #181 ac523b5b.
+      function _is_helper_stem() {
+        case "$1" in
+          func|crt-aliases|ucrtbase-common|vcruntime140-common) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+
       # Helper: generate .a from a processed .def file into a given output dir.
       # ${_dlltool_machine} is set per-arch by the loop below.
       # Only counts as generated when dlltool exits 0 AND produced a non-empty
@@ -201,6 +211,7 @@ SYNCHRONIZATION_DEF
         if [[ ${#_orig_defs[@]} -gt 0 ]]; then
           for _def in "${_orig_defs[@]}"; do
             _stem="$(basename "${_def%.def}")"
+            _is_helper_stem "${_stem}" && continue
             _gen_implib "${_stem}" "${_def}" "${_ia_outdir}"
           done
         fi
@@ -211,6 +222,7 @@ SYNCHRONIZATION_DEF
         for _def_in in "${_mingw_common}"/*.def.in; do
           [[ -f "${_def_in}" ]] || continue
           _stem="$(basename "${_def_in%.def.in}")"
+          _is_helper_stem "${_stem}" && continue
           _lib="${_ia_outdir}/lib${_stem}.a"
           [[ -f "${_lib}" ]] && continue
           _def="${_ia_outdir}/${_stem}.def"
@@ -256,10 +268,7 @@ SYNCHRONIZATION_DEF
           for _supp_in in "${_supp_defs}"/*.def.in; do
             [[ -f "${_supp_in}" ]] || continue
             _supp_stem="$(basename "${_supp_in%.def.in}")"
-            # Skip pure include helpers (not standalone DLL definitions)
-            case "${_supp_stem}" in
-              func|ucrtbase-common|crt-aliases) continue ;;
-            esac
+            _is_helper_stem "${_supp_stem}" && continue
             _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
             [[ -f "${_supp_lib}" ]] && continue
             _supp_def="${_ia_outdir}/${_supp_stem}.def"
@@ -278,6 +287,7 @@ SYNCHRONIZATION_DEF
           for _supp_def in "${_supp_defs}"/*.def; do
             [[ -f "${_supp_def}" ]] || continue
             _supp_stem="$(basename "${_supp_def%.def}")"
+            _is_helper_stem "${_supp_stem}" && continue
             _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
             [[ -f "${_supp_lib}" ]] && continue
             _gen_implib "${_supp_stem}" "${_supp_def}" "${_ia_outdir}"
@@ -291,10 +301,15 @@ SYNCHRONIZATION_DEF
 
       echo "INFO: [_mingw] import libs generated=${_gen_count} failed=${_gen_fail}" >&2
       if [[ "${_gen_fail}" -gt 0 ]]; then
-        echo "WARN: [_mingw] failed import libs:${_gen_failed}" >&2
+        echo "ERROR: [_mingw] failed import libs:${_gen_failed}" >&2
+        return 1
       fi
-      if [[ "${_gen_count}" -eq 0 ]]; then
-        echo "ERROR: [_mingw] no import libs were generated; dlltool ran but produced zero usable archives" >&2
+      # Floor subsumes the old ==0 check. Baseline 2355 measured on
+      # PR #181 / ac523b5b; 2200 leaves room for a snapshot legitimately
+      # adding/removing a handful of .def files while still catching a collapse.
+      _gen_count_floor=2200
+      if [[ "${_gen_count}" -lt "${_gen_count_floor}" ]]; then
+        echo "ERROR: [_mingw] import lib count ${_gen_count} is below floor ${_gen_count_floor} (baseline 2355 measured on PR #181 / ac523b5b)" >&2
         return 1
       fi
 
@@ -450,42 +465,51 @@ SYNCHRONIZATION_DEF
       _bp_setjmp="${BUILD_PREFIX}/lib/zig/libc/include/any-windows-any/setjmp.h"
       [[ -f "${_bp_setjmp}" ]] || _bp_setjmp="${BUILD_PREFIX}/Library/lib/zig/libc/include/any-windows-any/setjmp.h"
       if [[ -f "${_bp_setjmp}" ]]; then
+        # Unconditional (not dbg-gated): pattern drift here is the expected
+        # failure mode when an upstream zig snapshot reformats this declaration.
+        _bp_notfound_msg="WARN: [_mingw] _CRTIMP pattern not found in bootstrap setjmp.h (${_bp_setjmp}); expected only if bootstrap zig no longer marks _setjmp/_setjmp3 dllimport"
         if command -v grep >/dev/null 2>&1 && command -v sed >/dev/null 2>&1; then
           if grep -qE '^_CRTIMP int __cdecl .*_setjmp3?\(' "${_bp_setjmp}"; then
             sed -i.zigbak -E 's/^_CRTIMP( int __cdecl .*_setjmp3?\()/\1/' "${_bp_setjmp}"
             dbg echo "[_mingw] stripped _CRTIMP from bootstrap setjmp.h: ${_bp_setjmp}"
+          else
+            echo "${_bp_notfound_msg}" >&2
           fi
-        elif "${PYTHON:-python}" -c 'import sys' >/dev/null 2>&1; then
-          # grep/sed not on PATH (Windows CI): do the equivalent regex
-          # substitution in python, preserving the .zigbak backup behaviour.
-          _py_result="$("${PYTHON:-python}" - "${_bp_setjmp}" <<'PYEOF'
-import re
-import shutil
-import sys
-
-path = sys.argv[1]
-with open(path, "r") as f:
-    text = f.read()
-new_text = re.sub(
-    r'^_CRTIMP( int __cdecl .*_setjmp3?\()',
-    r'\1',
-    text,
-    flags=re.MULTILINE,
-)
-if new_text != text:
-    shutil.copy2(path, path + ".zigbak")
-    with open(path, "w") as f:
-        f.write(new_text)
-    print("changed")
-else:
-    print("unchanged")
-PYEOF
-)"
-          if [[ "${_py_result}" == "changed" ]]; then
-            dbg echo "[_mingw] stripped _CRTIMP from bootstrap setjmp.h via python: ${_bp_setjmp}"
+        elif [[ -r "${_bp_setjmp}" ]]; then
+          # grep/sed not on PATH (Windows CI): pure-bash equivalent of
+          # s/^_CRTIMP( int __cdecl .*_setjmp3?\()/\1/, no external tools needed.
+          _bp_changed=0
+          _bp_no_final_nl=0
+          _bp_tmp="${_bp_setjmp}.tmp$$"
+          : > "${_bp_tmp}"
+          _bp_xt=0
+          if [[ "${DEBUG_ZIG_BUILD:-0}" != "1" ]]; then
+            case $- in *x*) _bp_xt=1 ;; esac
+            { set +x; } 2>/dev/null
+          fi
+          # Silence xtrace for per-line loop to avoid flooding log.
+          while IFS= read -r line || { _bp_no_final_nl=1; [[ -n "${line}" ]]; }; do
+            if [[ "${line}" == "_CRTIMP int __cdecl "* && "${line}" == *"_setjmp"* && "${line}" == *"("* ]]; then
+              line="${line#_CRTIMP}"
+              _bp_changed=1
+            fi
+            if [[ "${_bp_no_final_nl}" == "1" ]]; then
+              printf '%s' "${line}" >> "${_bp_tmp}"
+            else
+              printf '%s\n' "${line}" >> "${_bp_tmp}"
+            fi
+          done < "${_bp_setjmp}"
+          if [[ "${_bp_xt}" == "1" ]]; then { set -x; } 2>/dev/null; fi
+          if [[ "${_bp_changed}" == "1" ]]; then
+            cp "${_bp_setjmp}" "${_bp_setjmp}.zigbak"
+            mv "${_bp_tmp}" "${_bp_setjmp}"
+            dbg echo "[_mingw] stripped _CRTIMP from bootstrap setjmp.h via bash: ${_bp_setjmp}"
+          else
+            rm -f "${_bp_tmp}"
+            echo "${_bp_notfound_msg}" >&2
           fi
         else
-          echo "WARN: [_mingw] grep/sed and python both unavailable; _CRTIMP strip on bootstrap setjmp.h SKIPPED" >&2
+          echo "WARN: [_mingw] bootstrap setjmp.h unreadable; _CRTIMP strip on bootstrap setjmp.h SKIPPED" >&2
         fi
       else
         echo "WARN: [_mingw] bootstrap setjmp.h not found; warm link may fail on _setjmp3" >&2
@@ -573,6 +597,15 @@ WARM_EOF
       dbg echo "=== Stub archive generation done ==="
 
     else
+      _mingw_skip_reason=""
+      if [[ -z "${_dlltool}" ]]; then
+        _mingw_skip_reason="${_mingw_skip_reason}dlltool not found; "
+      fi
+      if [[ ! -x "${_zig_bin}" ]]; then
+        _mingw_skip_reason="${_mingw_skip_reason}zig_bin not executable; "
+      fi
+      # WARN only: promote to ERROR once CI shows whether this branch is ever legitimately taken.
+      echo "WARNING: [_mingw] import-lib pre-generation SKIPPED ENTIRELY (${_mingw_skip_reason}dlltool=${_dlltool:-<not found>} zig_bin=${_zig_bin}); no import libs generated, no import-lib checks ran" >&2
       dbg echo "=== llvm-dlltool or zig not found; skipping import lib pre-generation ==="
     fi
   fi
