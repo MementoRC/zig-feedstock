@@ -365,12 +365,6 @@ else
 fi
 
 dbg echo "Post-install implementation package: ${PKG_NAME}"
-# DIAG: the pre-mv filename has never been captured in any CI log. win-64
-# native ends up with zig.exe, win-arm64 cross with an unsuffixed zig, from
-# this same mv on the same host and shell. This listing is the missing
-# measurement; remove it once the mechanism is settled.
-echo "DIAG pre-mv listing of \${PREFIX}/bin:"
-ls -la "${PREFIX}/bin/" || true
 mv "${PREFIX}"/bin/zig "${PREFIX}"/bin/"${CONDA_TRIPLET}"-zig
 
 # Non-unix conda convention: artifacts go under Library/
