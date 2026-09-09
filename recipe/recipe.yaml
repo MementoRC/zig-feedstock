@@ -637,7 +637,11 @@ outputs:
         # For cross-compiler: depend on zig_impl for BUILD platform (external package)
         - if: is_cross_compiler
           then:
-            - zig_impl_${{ xc_build_platform }}${{ zig_impl_pin }}
+            # The build-machine bootstrap is not an ARM64 runtime. Use this
+            # snapshot's corrected implementation for wrappers hosted on ARM64.
+            - if: xc_build_platform == "win-arm64"
+              then: 'zig_impl_win-arm64 ==${{ version }} *_${{ snapshot | replace("+", "_") }}_${{ build_number }}'
+              else: zig_impl_${{ xc_build_platform }}${{ zig_impl_pin }}
           else:
             - ${{ pin_subpackage("zig_impl_" ~ cross_target_platform_, exact=True) }}
         - if: xc_ppc64le
