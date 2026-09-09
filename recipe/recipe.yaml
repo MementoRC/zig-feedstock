@@ -6,7 +6,7 @@ context:
   version: "0.17.0"
   abi_version: ${{ (version | split("."))[:2] | join(".") }}
   snapshot: "2056+79a9897cd"
-  snapshot_ref: "1970"
+  snapshot_ref: "2056"
   build_ref: "0"
   zig_impl_pin: '[version="${{ abi_version }}.*", build="*_${{ snapshot_ref }}_*", build_number=">=${{ build_ref }}"]'
 
@@ -637,8 +637,8 @@ outputs:
         # For cross-compiler: depend on zig_impl for BUILD platform (external package)
         - if: is_cross_compiler
           then:
-            # The build-machine bootstrap is not an ARM64 runtime. Use this
-            # snapshot's corrected implementation for wrappers hosted on ARM64.
+            # Published ARM64 build 0 lacks the compiler executable suffix.
+            # Require this corrected build for ARM64-hosted wrappers.
             - if: xc_build_platform == "win-arm64"
               then: 'zig_impl_win-arm64 ==${{ version }} *_${{ snapshot | replace("+", "_") }}_${{ build_number }}'
               else: zig_impl_${{ xc_build_platform }}${{ zig_impl_pin }}
