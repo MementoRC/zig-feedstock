@@ -222,10 +222,6 @@ source:
           - patches/ppc64le/0001-arch-support-LdScript.zig.patch
           # Phase 0002: Build Configuration (LLVM backend, library paths)
           - patches/ppc64le/0002-build-config-build.zig.patch
-          # Phase 0003: Linker Redirection (comprehensive GCC linker with full flag translation)
-          - patches/ppc64le/0003-linker-redirect-link.zig.patch
-          - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
-          - patches/ppc64le/0004-dl-iterate-phdr-no-pt-phdr-posix.zig.patch
       - if: not unix
         then:
           - patches/non_unix/build.zig-01-maxrss.patch
@@ -553,9 +549,9 @@ outputs:
             - t="$(mktemp -d)"
             - trap 'rm -rf "$t"' EXIT
             - printf 'int main(void){return 0;}\n' > "$t/test_lld.c"
-            - if: linux and not ppc64le
+            - if: linux
               then:
-                # Linux: test with ELF --dynamic-list
+                # Linux (incl. ppc64le ablation round): test with ELF --dynamic-list
                 - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
                 - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
                 - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
@@ -576,11 +572,6 @@ outputs:
                 - printf '_main\n' > "$t/test_lld.exp"
                 - ${{ conda_triplet }}-zig cc -fuse-ld=lld -Wl,-exported_symbols_list,"$t/test_lld.exp" -o "$t/test_lld" "$t/test_lld.c"
                 - echo "PASS -fuse-ld=lld with -exported_symbols_list (macOS/Mach-O via LLD)"
-            - if: ppc64le and linux
-              then:
-                # LLD lacks ppc64le relocation support; wrapper guard tested via
-                # test_zig_toolchain.py (activation package). Raw binary has no wrapper.
-                - echo "Skip -fuse-ld=lld test on ppc64le (no wrapper in zig_impl_)"
         requirements:
           build:
             - ${{ m2 }}bash >=5.2

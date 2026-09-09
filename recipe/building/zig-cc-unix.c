@@ -24,9 +24,10 @@
  * de-dup rules (see recipe/building/flag_rules.py) are delegated to the
  * generated, portable zig_translate_flags() (_translate.inc); only the
  * out-of-scope hand-written logic (sysroot, the extra LLD-trigger scan,
- * the -Xlinker general pre-filter, the ppc64le hard error, the GCC-only
- * post-translation drops, and the macOS deployment-target rewrite)
- * remains there.
+ * the -Xlinker general pre-filter, the GCC-only post-translation drops,
+ * and the macOS deployment-target rewrite) remains there.
+ * ABLATION (ablate/gcc-driver): the ppc64le -fuse-ld=lld hard error that
+ * used to be listed here was removed to let LLD attempt ppc64le links.
  *
  * Placeholders replaced at install time:
  *   ZIG_BIN          - baked zig path.  NOTE: install bakes the LITERAL
@@ -303,18 +304,6 @@ static int run_cc(const char *zig_bin, const char *prog, int mode_is_cxx,
     /* ---- STEP 5: merge the generated fn's own R8/R9 trigger scan
      * with the hand-written out-of-scope scan above. ---- */
     int use_lld = use_lld_raw || use_lld_gen;
-
-    /* ---- STEP 6: ppc64le hard error.
-     * Both stderr lines below are VERBATIM from the bash original,
-     * including the "zig cc:" prefix even in c++ mode -- the bash
-     * source hardcodes it that way regardless of _ZIG_MODE, so it is
-     * reproduced as-is. */
-    if (use_lld && str_eq(ZIG_TARGET_ARCH, "powerpc64le")) {
-        fprintf(stderr, "zig cc: error: -fuse-ld=lld is not supported on ppc64le (LLD lacks ppc64le relocation support)\n");
-        fprintf(stderr, "  Remove -fuse-ld=lld or any LLD-only flags (--dynamic-list, --version-script, etc.)\n");
-        free(out_argv);
-        return 1;
-    }
 
     /* ---- STEP 7: post-translation drop filter over the translated
      * args. ---- */
