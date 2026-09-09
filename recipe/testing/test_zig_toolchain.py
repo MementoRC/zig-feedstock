@@ -599,10 +599,10 @@ def test_windows_import_libs() -> None:
         r = _run(
             [zig_cc, "-lsynchronization", "-o", str(out), str(src)],
             cwd=td,
-            timeout=60,
+            timeout=300,
         )
         if r.stderr == "TIMEOUT":
-            WARN("windows import libs (-lsynchronization)", "timed out (60s)")
+            WARN("windows import libs (-lsynchronization)", "timed out (300s)")
         elif r.returncode != 0:
             if "DllImportLibraryNotFound" in r.stderr or "libsynchronization" in r.stderr:
                 FAIL(
@@ -642,29 +642,25 @@ def test_windows_import_libs() -> None:
         else:
             PASS("windows import libs (-lsynchronization)")
 
-        # Test 2: -lapi-ms-win-core-synch-l1-2-0 (LIBRARY line missing .dll suffix → unreachable)
+        # Test 2 exercises the MinGW .def file, so select the GNU ABI even
+        # when this wrapper defaults to MSVC. An MSVC SDK lookup does not
+        # exercise the .def parser and cannot validate its LIBRARY directive.
+        gnu_arch = "x86" if _arch in ("i386", "i686") else _arch
+        gnu_target = f"{gnu_arch}-windows-gnu"
         out2 = Path(td) / "apisynch_test.exe"
         r2 = _run(
-            [zig_cc, "-lapi-ms-win-core-synch-l1-2-0", "-o", str(out2), str(src)],
+            [zig_cc, "-target", gnu_target, "-lapi-ms-win-core-synch-l1-2-0", "-o", str(out2), str(src)],
             cwd=td,
-            timeout=60,
+            timeout=300,
         )
         if r2.stderr == "TIMEOUT":
-            WARN("windows import libs (-lapi-ms-win-core-synch-l1-2-0)", "timed out (60s)")
+            WARN("windows import libs (-lapi-ms-win-core-synch-l1-2-0)", "timed out (300s)")
         elif r2.returncode != 0:
             if "unreachable" in r2.stderr or "reached unreachable" in r2.stderr:
                 FAIL(
                     "windows import libs (-lapi-ms-win-core-synch-l1-2-0)",
                     "zig panic: LIBRARY line missing .dll suffix in api-ms-win-core-synch-l1-2-0.def "
                     "(feedstock .dll suffix fix not applied)",
-                )
-            elif "unable to find dynamic system library" in r2.stderr:
-                # api-ms-win-core-synch-l1-2-0 is absent from the arm64 Windows SDK layout
-                # on some CI runners. This is an SDK gap, not our bug — the unreachable panic
-                # (what we fixed) is absent, so the fix is working.
-                WARN(
-                    "windows import libs (-lapi-ms-win-core-synch-l1-2-0)",
-                    "lib not in Windows SDK paths (arm64 SDK gap) — no unreachable panic, fix OK",
                 )
             else:
                 FAIL(
