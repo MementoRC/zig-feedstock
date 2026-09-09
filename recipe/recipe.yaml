@@ -226,9 +226,6 @@ source:
           - patches/ppc64le/0003-linker-redirect-link.zig.patch
           - patches/ppc64le/0003-gcc-linker-comprehensive-Lld.zig.patch
           - patches/ppc64le/0004-dl-iterate-phdr-no-pt-phdr-posix.zig.patch
-          # Phase 0005-0006: CMake ppc64le configuration (mlongcall, lld bundle)
-          - patches/cmake/0005-ppc64le-mlongcall-CMakeLists.txt.patch
-          - patches/cmake/0006-ppc64le-lld-bundle-CMakeLists.txt.patch
       - if: not unix
         then:
           - patches/non_unix/build.zig-01-maxrss.patch
@@ -398,10 +395,6 @@ outputs:
           strict: true
           bin:
             - ${{ conda_triplet }}-zig
-          lib:
-            - if: ppc64le
-              then:
-                - zig-lld-bundle
           files:
             - if: not skip_langref
               then:
