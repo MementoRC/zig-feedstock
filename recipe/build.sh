@@ -108,21 +108,6 @@ if is_unix; then
   EXTRA_ZIG_ARGS+=(-Ddoctest-target=${ZIG_TRIPLET})
 fi
 
-# ppc64le: code-size and stub-placement flags. RETAINED but UNTESTED --
-# the R_PPC64_REL24 mitigation they shipped with was measured unnecessary 2026-09-08.
-if [[ "${target_platform}" == "linux-ppc64le" ]]; then
-  export CFLAGS="${CFLAGS:-} -fno-partial-inlining -fno-ipa-cp-clone"
-  export CXXFLAGS="${CXXFLAGS:-} -fno-partial-inlining -fno-ipa-cp-clone"
-  export LDFLAGS="${LDFLAGS:-} -Wl,--stub-group-size=0"
-  export NINJA_FLAGS="-v"
-  EXTRA_CMAKE_ARGS+=(
-    -DCMAKE_C_FLAGS="${CFLAGS}"
-    -DCMAKE_CXX_FLAGS="${CXXFLAGS}"
-    -DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS}"
-    -DCMAKE_SHARED_LINKER_FLAGS="${LDFLAGS}"
-  )
-fi
-
 # Two-phase langref strategy: Phase 1 (here) ALWAYS skips langref HTML installation;
 # Phase 2 (zig build langref) handles it separately when stage3 is runnable.
 EXTRA_ZIG_ARGS+=(-Dno-langref)
