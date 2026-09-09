@@ -27,6 +27,7 @@
  */
 
 #include "nonunix_common.h"
+#include "nonunix_spawn.h"
 #include "_translate.inc"
 #include <stdio.h>
 #include <stdlib.h>
@@ -348,7 +349,7 @@ int main(int argc, char *argv[]) {
     restore_msys2_system32_path();
 
     /* Execute zig */
-    int ret = (int)_spawnv(_P_WAIT, zig_path, new_argv);
+    int ret = zig_spawn_wait(zig_path, new_argv);
     free(filtered);
     free(new_argv);
 
