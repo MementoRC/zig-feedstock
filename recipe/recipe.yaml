@@ -1,7 +1,7 @@
 schema_version: 1
 
 context:
-  build_number: 0
+  build_number: 1
   name: zig
   version: "0.17.0"
   abi_version: ${{ (version | split("."))[:2] | join(".") }}
@@ -412,6 +412,9 @@ outputs:
               then:
                 - zig-lld-bundle
           files:
+            - if: not unix
+              then:
+                - Library/bin/${{ conda_triplet }}-zig.exe
             - if: not skip_langref
               then:
                 - ${{ library }}doc/langref.html
@@ -604,6 +607,7 @@ outputs:
           CONDA_TRIPLET: ${{ conda_triplet }}
           CROSS_COMPILER: ${{ is_cross_compiler }}
           SHIM_RUNS_ON_TARGET: ${{ shim_runs_on_target }}
+          SHIM_ZIG_TRIPLET: ${{ zig_target_triplet }}
           NATIVE_TRIPLET: ${{ xc_build_triplet }}
           NATIVE_ZIG_TRIPLET: ${{ xc_build_zig_triplet }}
           # Zig toolchain identification (independent of gcc TOOLCHAIN)
