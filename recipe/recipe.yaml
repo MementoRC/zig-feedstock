@@ -283,7 +283,7 @@ source:
       - if: build_platform == "win-arm64"
         then:
           - url: https://ziglang.org/builds/zig-aarch64-windows-${{ version }}-dev.${{ snapshot }}.zip
-            sha256: f63987d4f4e90e9b5aff9e38d4265696d9abd83de2e70d4bb9b4ac22d6febf2c
+            sha256: 0b10b3bcc3a2143f45a7219c83c386d2335989a03a884ed735cbdde5d41ac72a
             target_directory: zig-bootstrap
 
 build:

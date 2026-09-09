@@ -6,6 +6,7 @@ IFS=$'\n\t'
 export build_platform="${build_platform:-${target_platform}}"
 
 source "${RECIPE_DIR}/building/_bash_check.sh"
+source "${RECIPE_DIR}/building/_tool_check.sh"
 
 # --- Functions ---
 
