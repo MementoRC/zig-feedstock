@@ -34,10 +34,13 @@ _PROBE_TIMEOUT_S = 900
 # stalls the test with no diagnostic at all. Generous enough for emulated lanes.
 _AR_LIST_TIMEOUT_S = 120
 
-# Link probe: setjmp/longjmp reaches the __setjmp3 path, the double multiply
-# reaches the _fpreset-adjacent path. Both are link-time-only concerns here.
+# Link probe: setjmp/longjmp reaches the __setjmp3 path; the explicit
+# _fpreset() call forces the linker to resolve that symbol too. Both are
+# link-time-only concerns -- the binary is never executed.
 _LINK_PROBE_C = """\
 #include <setjmp.h>
+
+extern void _fpreset(void);
 
 static jmp_buf _probe_buf;
 
@@ -47,6 +50,7 @@ static double _probe_fp(double x) {
 
 int main(void) {
     volatile double d = _probe_fp(3.0);
+    _fpreset();
     if (setjmp(_probe_buf) == 0) {
         longjmp(_probe_buf, 1);
     }
