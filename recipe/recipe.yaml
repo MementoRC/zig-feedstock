@@ -324,6 +324,7 @@ outputs:
               - "*/ld-linux-*.so.*"
               - "*/ld64.so.*"
       script:
+        interpreter: brush
         file: build.sh
         env:
           CONDA_TRIPLET: ${{ conda_triplet }}
@@ -346,8 +347,8 @@ outputs:
         - ${{ compiler('c') }}
         - ${{ compiler('cxx') }}
         - ${{ stdlib("c") }}
-        - ${{ m2 }}bash >=5.2
         - ${{ m2 }}file
+        - brush
         - cmake >=3.5
         - llvm-tools ${{ llvm_version }}.*
         - ninja
