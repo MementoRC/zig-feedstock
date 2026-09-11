@@ -372,6 +372,8 @@ outputs:
           then:
             - clangdev ${{ llvm_version }}.*
             - lld ${{ llvm_version }}.*
+            - zlib
+            - zstd
       host:
         - clangdev ${{ llvm_version }}.*
         - libclang-cpp ${{ llvm_version }}.*
