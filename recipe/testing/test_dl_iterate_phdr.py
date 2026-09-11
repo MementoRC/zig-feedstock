@@ -21,6 +21,29 @@ An optional zig_lib_dir argument points --zig-lib-dir at a different stdlib,
 which is how the positive control is run: against an UNPATCHED lib dir this
 test must FAIL with "reached unreachable code". If it passes there, the probe
 is not reaching the patched code and a green result here proves nothing.
+
+PARAMETERIZED OVER LINKER (LINKER_CASES below): PT_PHDR presence is a
+property of the LINKER, not of -static -- ld.bfd omits PT_PHDR for a static
+non-PIE ET_EXEC, LLD emits it even under -static (measured: round 4's
+-static-only probe came out LLD-linked and carried PT_PHDR, giving an
+INCONCLUSIVE result rather than exercising the patch; a follow-up measured
+that `-fuse-ld=bfd` is inert -- see below -- so LLD-then-linked is the only
+buildable starting point). So this file builds two cases:
+  - lld            : expect PT_PHDR present  (the normal, now-default path)
+  - synth-no-pt-phdr : PT_PHDR surgically removed from an LLD probe after
+                       the fact (the patched `else 0` fallback path)
+
+BFD REACHABILITY -- INVESTIGATED, NEGATIVE RESULT: `-fuse-ld=bfd` is not
+wired to anything in this toolchain and cannot currently be used to force
+ld.bfd through `zig cc`/`zig build-exe` (see the comment above LINKER_CASES
+for the full finding). Instead of relying on a bfd link, the second case
+SYNTHESIZES a PT_PHDR-less binary: build the normal LLD probe, then rewrite
+a copy of its ELF program-header table in place to remove the PT_PHDR entry
+(_strip_pt_phdr, reusing the same raw-byte header parser as the reader
+below), assert the removal actually took, and run the result. This restores
+the positive-control coverage above without depending on a real ld.bfd link.
+If the rewritten binary cannot even be executed (loader rejects it), that is
+reported as a distinct INVALID finding, not folded into a patch-code FAIL.
 """
 from __future__ import annotations
 
@@ -55,25 +78,315 @@ PANIC_RE = re.compile(r"reached unreachable code|panic:", re.IGNORECASE)
 
 
 def _build(triplet: str, src: str, binary: str, zig_target: str,
-           zig_lib_dir: str = "") -> subprocess.CompletedProcess:
+           zig_lib_dir: str = "", extra_flags: list[str] | None = None,
+           ) -> subprocess.CompletedProcess:
     # qemu-user does not PATH-search argv[0]; resolve it ourselves.
     zig = shutil.which(f"{triplet}-zig") or f"{triplet}-zig"
     cmd = [zig, "build-exe"]
     if zig_lib_dir:
         cmd += ["--zig-lib-dir", zig_lib_dir]
-    # -static keeps the link non-PIE ET_EXEC, which is what drops PT_PHDR.
-    cmd += ["-target", zig_target, "-static", "-femit-bin=" + binary, src]
+    # -static keeps the link non-PIE ET_EXEC, which is what drops PT_PHDR
+    # (linker-dependent -- see LINKER_CASES).
+    cmd += ["-target", zig_target, "-static"] + (extra_flags or [])
+    cmd += ["-femit-bin=" + binary, src]
     # _run's 30s default is too low: zig build-exe under qemu has measured >149s.
     return _run(cmd, timeout=600, target=triplet)
 
 
+_PT_PHDR = 6
+
+
+def _parse_ehdr(ehdr: bytes) -> tuple[str, int, int, int, int] | None:
+    """Common ELF header fields needed for program-header work.
+
+    Returns (endian, e_phoff, e_phentsize, e_phnum, e_phnum_off), or None if
+    `ehdr` (the first bytes of a file) is not a parsable ELF header.
+    e_phnum_off is the file offset of the e_phnum field itself (2 bytes,
+    same width in both ELF classes), needed by callers that rewrite it.
+    Shared by _read_program_header_types (read-only) and _strip_pt_phdr
+    (in-place edit) so the offset table exists in exactly one place.
+    """
+    if len(ehdr) < 20 or ehdr[:4] != b"\x7fELF":
+        return None
+    ei_class = ehdr[4]  # 1=32-bit, 2=64-bit
+    ei_data = ehdr[5]  # 1=little-endian, 2=big-endian
+    endian = "little" if ei_data == 1 else "big"
+    if ei_class == 2 and len(ehdr) >= 64:
+        e_phoff = int.from_bytes(ehdr[0x20:0x28], endian)
+        e_phentsize = int.from_bytes(ehdr[0x36:0x38], endian)
+        e_phnum = int.from_bytes(ehdr[0x38:0x3A], endian)
+        e_phnum_off = 0x38
+    elif ei_class == 1 and len(ehdr) >= 52:
+        e_phoff = int.from_bytes(ehdr[0x1C:0x20], endian)
+        e_phentsize = int.from_bytes(ehdr[0x2A:0x2C], endian)
+        e_phnum = int.from_bytes(ehdr[0x2C:0x2E], endian)
+        e_phnum_off = 0x2C
+    else:
+        return None
+    return endian, e_phoff, e_phentsize, e_phnum, e_phnum_off
+
+
+def _read_program_header_types(binary: str) -> list[int] | None:
+    """ELF program header p_type values for `binary`, or None if unparsable.
+
+    Raw-byte reader (mirrors _test_utils._elf_foreign_arch) so this does not
+    depend on readelf/llvm-readelf being on PATH; ELF headers are
+    self-describing regardless of the binary's target arch.
+    """
+    try:
+        with open(binary, "rb") as f:
+            ehdr = f.read(64)  # covers Elf32_Ehdr (52B) and Elf64_Ehdr (64B)
+            parsed = _parse_ehdr(ehdr)
+            if parsed is None:
+                return None
+            endian, e_phoff, e_phentsize, e_phnum, _e_phnum_off = parsed
+            f.seek(e_phoff)
+            types = []
+            for _ in range(e_phnum):
+                entry = f.read(e_phentsize)
+                if len(entry) < 4:
+                    break
+                types.append(int.from_bytes(entry[0:4], endian))
+            return types
+    except OSError:
+        return None
+
+
+def _strip_pt_phdr(src: str, dst: str) -> None:
+    """Copy `src` to `dst`, then rewrite `dst` to remove its PT_PHDR entry.
+
+    Shifts the surviving program-header entries down over the removed one
+    and decrements e_phnum in the ELF header, using the same endianness and
+    32/64-bit width _parse_ehdr already derived from EI_DATA/EI_CLASS (never
+    hardcoded, so this works unchanged on big-endian or 32-bit probes too).
+    Raises ValueError if `src` has no PT_PHDR entry to strip.
+    """
+    shutil.copyfile(src, dst)
+    with open(dst, "r+b") as f:
+        ehdr = f.read(64)
+        parsed = _parse_ehdr(ehdr)
+        if parsed is None:
+            raise ValueError(f"{src!r} is not a parsable ELF")
+        endian, e_phoff, e_phentsize, e_phnum, e_phnum_off = parsed
+
+        f.seek(e_phoff)
+        raw = f.read(e_phentsize * e_phnum)
+        entries = [raw[i * e_phentsize:(i + 1) * e_phentsize] for i in range(e_phnum)]
+        kept = [e for e in entries if int.from_bytes(e[0:4], endian) != _PT_PHDR]
+        if len(kept) == len(entries):
+            raise ValueError(f"{src!r} has no PT_PHDR entry to strip")
+
+        f.seek(e_phoff)
+        f.write(b"".join(kept))
+        # Zero the vacated tail so no stale bytes are misread as an entry.
+        f.write(b"\x00" * (e_phentsize * (len(entries) - len(kept))))
+
+        f.seek(e_phnum_off)
+        f.write(len(kept).to_bytes(2, endian))
+
+
 def _has_pt_phdr(binary: str) -> bool:
-    readelf = subprocess.run(
-        ["readelf", "-l", binary],
-        check=True, capture_output=True, text=True,
-    )
+    types = _read_program_header_types(binary)
+    if types is not None:
+        return _PT_PHDR in types
+    # Raw parse failed (unexpected for a zig-built ELF); fall back to a tool
+    # rather than hard-depending on readelf being on PATH.
+    readelf = shutil.which("readelf")
+    if not readelf:
+        raise RuntimeError(
+            f"cannot parse ELF program headers of {binary!r} and no readelf on PATH"
+        )
+    result = subprocess.run([readelf, "-l", binary], check=True,
+                             capture_output=True, text=True)
     # Segment-type column; PT_PHDR renders as a bare "PHDR" token.
-    return bool(re.search(r"^\s*PHDR\b", readelf.stdout, re.MULTILINE))
+    return bool(re.search(r"^\s*PHDR\b", result.stdout, re.MULTILINE))
+
+
+def _dump_segments(binary: str) -> None:
+    """Best-effort diagnostic dump of binary's program header segment types."""
+    types = _read_program_header_types(binary)
+    if types is not None:
+        print(f"program header p_type values: {types}", file=sys.stderr)
+        return
+    if shutil.which("readelf"):
+        subprocess.run(["readelf", "-l", binary], check=False)
+
+
+# ---------------------------------------------------------------------------
+# Linker parameterization
+# ---------------------------------------------------------------------------
+# Investigated 2026-09-11: `-fuse-ld=bfd` is not wired to anything in this
+# toolchain and cannot currently force ld.bfd through zig cc/build-exe:
+#   - recipe/building/zig-cc-unix.c has zero "bfd" occurrences (grepped) --
+#     the wrapper does not intercept, translate, or block the flag.
+#   - Upstream zig's own cc-arg-parser (checked against vendored
+#     tmp_patchgen/src/zig-0.15.2/src/main.zig, structurally representative)
+#     has NO -fuse-ld= entry in its clang_arg table at all; an unmatched
+#     flag falls into the generic `.other` case and is appended to cc_argv
+#     verbatim -- it never reaches linker selection.
+#   - patches/main.zig-fuse-ld-lld-cc-path.patch bolts recognition onto
+#     EXACTLY the literal string "-fuse-ld=lld" inside that `.other` branch
+#     (sets create_module.opts.use_lld = true). No other -fuse-ld=<X> value
+#     is special-cased anywhere in this patch set.
+# So "-fuse-ld=bfd" reaches zig as an inert passthrough token and cannot
+# produce a genuine PT_PHDR-less link through zig cc/build-exe. 2026-09-11
+# also measured directly: `-fuse-ld=bfd -static` still links with LLD and
+# the output still HAS PT_PHDR. Given that, the bfd case below does not try
+# to build via a linker flag at all -- it builds the normal LLD probe, then
+# SYNTHESIZES a PT_PHDR-less binary by editing a copy's ELF program-header
+# table directly (_strip_pt_phdr), reusing _parse_ehdr/_has_pt_phdr rather
+# than a second implementation.
+LINKER_CASES = [
+    {
+        "name": "lld",
+        "kind": "direct",
+        "extra_flags": ["-fuse-ld=lld"],
+        "expect_pt_phdr": True,  # LLD emits PT_PHDR even under -static (measured).
+    },
+    {
+        "name": "synth-no-pt-phdr",
+        "kind": "synthesized",  # PT_PHDR removed by post-build ELF surgery.
+    },
+]
+
+
+def _run_linker_case(triplet: str, zig_target: str, zig_lib_dir: str,
+                      tmpdir: str, case: dict) -> int:
+    """Dispatch to the builder for one LINKER_CASES entry. 0 pass, 1 fail."""
+    if case["kind"] == "synthesized":
+        return _run_synth_case(triplet, zig_target, zig_lib_dir, tmpdir, case)
+    return _run_direct_case(triplet, zig_target, zig_lib_dir, tmpdir, case)
+
+
+def _run_direct_case(triplet: str, zig_target: str, zig_lib_dir: str,
+                      tmpdir: str, case: dict) -> int:
+    """Build+run a probe linked directly with case['extra_flags']."""
+    name = case["name"]
+    src = os.path.join(tmpdir, f"probe_{name}.zig")
+    binary = os.path.join(tmpdir, f"probe_{name}")
+    with open(src, "w") as f:
+        f.write(PROBE_SRC)
+
+    build = _build(triplet, src, binary, zig_target, zig_lib_dir,
+                    extra_flags=case["extra_flags"])
+    if build.returncode != 0:
+        # Distinct from a runtime panic: a compile failure here usually
+        # means the std.posix.dl_iterate_phdr signature drifted, not that
+        # the PT_PHDR bug is back.
+        print(f"FAIL [{name}]: could not build the dl_iterate_phdr probe "
+              "(API drift, not a PT_PHDR result?)", file=sys.stderr)
+        print(build.stdout, file=sys.stderr)
+        print(build.stderr, file=sys.stderr)
+        return 1
+
+    has_phdr = _has_pt_phdr(binary)
+    if has_phdr != case["expect_pt_phdr"]:
+        got = "HAS" if has_phdr else "LACKS"
+        want = "HAS" if case["expect_pt_phdr"] else "LACKS"
+        print(f"INCONCLUSIVE [{name}]: probe binary {got} a PT_PHDR segment "
+              f"(expected {want}), so it cannot exercise the intended path; "
+              "adjust the link flags", file=sys.stderr)
+        _dump_segments(binary)
+        return 1
+
+    result = _run([binary], timeout=600, target=triplet)
+    combined = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode == 0 and not PANIC_RE.search(combined):
+        state = "with" if has_phdr else "without"
+        print(f"PASS [{name}] dl_iterate_phdr survives an ELF {state} PT_PHDR")
+        return 0
+
+    state = "with" if has_phdr else "without"
+    print(f"FAIL [{name}]: probe exited {result.returncode} on a binary "
+          f"{state} PT_PHDR", file=sys.stderr)
+    print("--- stdout ---", file=sys.stderr)
+    print(result.stdout, file=sys.stderr)
+    print("--- stderr ---", file=sys.stderr)
+    print(result.stderr, file=sys.stderr)
+    print("--- program headers (probe) ---", file=sys.stderr)
+    _dump_segments(binary)
+    return 1
+
+
+def _run_synth_case(triplet: str, zig_target: str, zig_lib_dir: str,
+                     tmpdir: str, case: dict) -> int:
+    """Build a normal LLD probe, strip its PT_PHDR entry, and run the result.
+
+    This is the case that actually exercises patch 0004's `else 0` fallback,
+    since -fuse-ld=bfd cannot produce a PT_PHDR-less link (see comment above
+    LINKER_CASES).
+    """
+    name = case["name"]
+    src = os.path.join(tmpdir, f"probe_{name}.zig")
+    base_binary = os.path.join(tmpdir, f"probe_{name}_base")
+    binary = os.path.join(tmpdir, f"probe_{name}")
+    with open(src, "w") as f:
+        f.write(PROBE_SRC)
+
+    build = _build(triplet, src, base_binary, zig_target, zig_lib_dir,
+                    extra_flags=["-fuse-ld=lld"])
+    if build.returncode != 0:
+        print(f"FAIL [{name}]: could not build the base probe for ELF "
+              "surgery (API drift, not a PT_PHDR result?)", file=sys.stderr)
+        print(build.stdout, file=sys.stderr)
+        print(build.stderr, file=sys.stderr)
+        return 1
+
+    if not _has_pt_phdr(base_binary):
+        print(f"INCONCLUSIVE [{name}]: base probe already lacks PT_PHDR "
+              "before surgery, so stripping it proves nothing", file=sys.stderr)
+        return 1
+
+    try:
+        _strip_pt_phdr(base_binary, binary)
+    except ValueError as exc:
+        print(f"FAIL [{name}]: ELF surgery could not strip PT_PHDR: {exc}",
+              file=sys.stderr)
+        return 1
+
+    if _has_pt_phdr(binary):
+        print(f"FAIL [{name}]: synthesis broke -- rewritten binary STILL "
+              "HAS a PT_PHDR segment after surgery", file=sys.stderr)
+        _dump_segments(binary)
+        return 1
+
+    try:
+        result = _run([binary], timeout=600, target=triplet)
+    except OSError as exc:
+        # The kernel/qemu loader refused to even start the process (as
+        # opposed to starting it and it crashing) -- distinct, louder
+        # finding: the synthesis approach itself may be invalid.
+        print(f"INVALID [{name}]: rewritten probe could not be executed at "
+              f"all ({type(exc).__name__}: {exc}) -- a PT_PHDR-less static "
+              "ET_EXEC is expected to be loadable but was not; the "
+              "ld.bfd-direct route may be needed instead", file=sys.stderr)
+        return 1
+
+    combined = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode == 0 and not PANIC_RE.search(combined):
+        print(f"PASS [{name}] dl_iterate_phdr survives a synthesized ELF "
+              "without PT_PHDR")
+        return 0
+
+    if PANIC_RE.search(combined):
+        print(f"FAIL [{name}]: probe exited {result.returncode} on a "
+              "PT_PHDR-less binary (unreachable hit -- patch 0004 not in "
+              "effect)", file=sys.stderr)
+    else:
+        print(f"INVALID [{name}]: rewritten probe exited {result.returncode} "
+              "without panicking and without exiting cleanly -- the loader "
+              "may be rejecting the PT_PHDR-less ELF outright; the synthesis "
+              "approach may not be valid, consider the ld.bfd-direct route "
+              "instead", file=sys.stderr)
+    print("--- stdout ---", file=sys.stderr)
+    print(result.stdout, file=sys.stderr)
+    print("--- stderr ---", file=sys.stderr)
+    print(result.stderr, file=sys.stderr)
+    print("--- program headers (probe) ---", file=sys.stderr)
+    _dump_segments(binary)
+    return 1
 
 
 def main(triplet: str, zig_target: str = "", zig_lib_dir: str = "") -> int:
@@ -83,45 +396,10 @@ def main(triplet: str, zig_target: str = "", zig_lib_dir: str = "") -> int:
         zig_target = triplet.replace("-conda", "") + ".2.17"
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        src = os.path.join(tmpdir, "probe.zig")
-        binary = os.path.join(tmpdir, "probe")
-        with open(src, "w") as f:
-            f.write(PROBE_SRC)
-
-        build = _build(triplet, src, binary, zig_target, zig_lib_dir)
-        if build.returncode != 0:
-            # Distinct from a runtime panic: a compile failure here usually
-            # means the std.posix.dl_iterate_phdr signature drifted, not that
-            # the PT_PHDR bug is back.
-            print("FAIL: could not build the dl_iterate_phdr probe "
-                  "(API drift, not a PT_PHDR result?)", file=sys.stderr)
-            print(build.stdout, file=sys.stderr)
-            print(build.stderr, file=sys.stderr)
-            return 1
-
-        if _has_pt_phdr(binary):
-            print("INCONCLUSIVE: probe binary HAS a PT_PHDR segment, so it "
-                  "cannot exercise the patched path; adjust the link flags",
-                  file=sys.stderr)
-            subprocess.run(["readelf", "-l", binary], check=False)
-            return 1
-
-        result = _run([binary], timeout=600, target=triplet)
-        combined = (result.stdout or "") + (result.stderr or "")
-
-        if result.returncode == 0 and not PANIC_RE.search(combined):
-            print("PASS dl_iterate_phdr survives an ELF without PT_PHDR")
-            return 0
-
-        print(f"FAIL: probe exited {result.returncode} on a binary without "
-              "PT_PHDR", file=sys.stderr)
-        print("--- stdout ---", file=sys.stderr)
-        print(result.stdout, file=sys.stderr)
-        print("--- stderr ---", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        print("--- readelf -l (probe) ---", file=sys.stderr)
-        subprocess.run(["readelf", "-l", binary], check=False)
-        return 1
+        rc = 0
+        for case in LINKER_CASES:
+            rc |= _run_linker_case(triplet, zig_target, zig_lib_dir, tmpdir, case)
+        return rc
 
 
 if __name__ == "__main__":

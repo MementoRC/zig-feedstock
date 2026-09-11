@@ -65,6 +65,20 @@ setup_upstream_zig_bootstrap
 # Bootstrap zig runs on the build machine -- always use CONDA_ZIG_BUILD
 BUILD_ZIG="${CONDA_ZIG_BUILD}"
 
+# Operator switch (off by default): rebuild a native bootstrap zig from our
+# patched source (no 0003 GCC redirect) and use it instead of the published,
+# 0003-contaminated CONDA_ZIG_BUILD. See recipe.yaml's bootstrap_native_rebuild
+# and building/_native_bootstrap.sh. Gate is the flag only -- not auto-derived.
+if [[ "${ZIG_BOOTSTRAP_NATIVE_REBUILD:-0}" == "1" ]]; then
+  if [[ ! -d "${SRC_DIR}/zig-source" ]]; then
+    echo "ERROR: ZIG_BOOTSTRAP_NATIVE_REBUILD=1 but ${SRC_DIR}/zig-source is missing" >&2
+    exit 1
+  fi
+  source "${RECIPE_DIR}/building/_native_bootstrap.sh"
+  build_native_bootstrap_zig "${SRC_DIR}/zig-source" "${BUILD_ZIG}"
+  BUILD_ZIG="${NATIVE_BOOTSTRAP_ZIG}"
+fi
+
 export CMAKE_BUILD_PARALLEL_LEVEL="${CPU_COUNT}"
 export CMAKE_GENERATOR=Ninja
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR_OVERRIDE:-${SRC_DIR}/zig-global-cache}"
@@ -121,6 +135,12 @@ if is_osx; then
 else
   EXTRA_CMAKE_ARGS+=(-DZIG_SYSTEM_LIBCXX=stdc++)
   EXTRA_ZIG_ARGS+=(--maxrss 7800000000)
+fi
+
+# -fno-plt makes GCC emit inline-PLT relocations that LLD cannot handle
+if [[ "${target_platform}" == "linux-ppc64le" ]]; then
+  export CFLAGS="${CFLAGS:-} -fplt"
+  export CXXFLAGS="${CXXFLAGS:-} -fplt"
 fi
 
 if is_not_unix; then
