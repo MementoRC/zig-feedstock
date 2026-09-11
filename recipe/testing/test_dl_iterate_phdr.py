@@ -5,7 +5,7 @@ zig's std.posix.dl_iterate_phdr derives dl_phdr_info.addr by scanning the
 program headers for PT_PHDR. Upstream falls off that loop into `unreachable`,
 so a binary with no PT_PHDR segment panics with "reached unreachable code"
 (ppc64le static links are the case we hit). Our patch
-patches/ppc64le/0004-dl-iterate-phdr-no-pt-phdr-posix.zig.patch replaces the
+patches/ppc64le/posix.zig-dl-iterate-phdr-no-pt-phdr.patch replaces the
 `else unreachable` with `else 0`.
 
 langref used to exercise this incidentally, via doctests that panic and walk
@@ -236,11 +236,12 @@ def _dump_segments(binary: str) -> None:
 # SYNTHESIZES a PT_PHDR-less binary by editing a copy's ELF program-header
 # table directly (_strip_pt_phdr), reusing _parse_ehdr/_has_pt_phdr rather
 # than a second implementation.
+# Note: build-exe takes -flld/-fno-lld; -fuse-ld=lld is cc-path only.
 LINKER_CASES = [
     {
         "name": "lld",
         "kind": "direct",
-        "extra_flags": ["-fuse-ld=lld"],
+        "extra_flags": ["-flld"],
         "expect_pt_phdr": True,  # LLD emits PT_PHDR even under -static (measured).
     },
     {
@@ -325,7 +326,7 @@ def _run_synth_case(triplet: str, zig_target: str, zig_lib_dir: str,
         f.write(PROBE_SRC)
 
     build = _build(triplet, src, base_binary, zig_target, zig_lib_dir,
-                    extra_flags=["-fuse-ld=lld"])
+                    extra_flags=["-flld"])
     if build.returncode != 0:
         print(f"FAIL [{name}]: could not build the base probe for ELF "
               "surgery (API drift, not a PT_PHDR result?)", file=sys.stderr)

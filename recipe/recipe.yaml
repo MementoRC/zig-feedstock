@@ -10,6 +10,7 @@ context:
   llvm_version: ${{ llvm_src_version | split(".") | first }}
 
   bootstrap_via_upstream: false
+  bootstrap_native_rebuild: ${{ env.get("ZIG_BOOTSTRAP_NATIVE_REBUILD", default="1" if ppc64le else "0") == "1" }}
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
@@ -154,9 +155,6 @@ context:
   # Single switch: also excludes lanes that cannot execute stage3 (see _can_run_stage3).
   skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" or ppc64le or riscv64 or not (is_native or linux or is_rosetta) }}
 
-  # Operator switch: rebuild a native bootstrap zig from our patched source before
-  # the real build (ppc64le use case). Off by default; see build.sh.
-  bootstrap_native_rebuild: ${{ env.get("ZIG_BOOTSTRAP_NATIVE_REBUILD", default="0") == "1" }}
   is_testable: ${{ not (build_platform in ["osx-64", "win-64"] and target_platform in ["osx-arm64", "win-arm64"]) }}
 
   # C shims run where the package installs, so build them for target_platform
@@ -216,17 +214,17 @@ source:
       # can also `zig cc -target powerpc64le-linux-gnu`.
       - if: linux
         then:
-          # Phase 0001: Architecture Support. Only LdScript is required here: its
+          # Architecture Support. Only LdScript is required here: its
           # outputFormat() runs on every backend. The 8 self-hosted ELF-linker arch
           # arms (relocation, Elf, Atom, LinkerDefined, ZigObject, synthetic_sections,
           # eh_frame, Thunk) were removed in build 9 after a linux-64 -> linux-ppc64le
           # build + ppc64le tests confirmed they are dead code: 0003-linker-redirect
           # forces the LLD backend (-> gcc/ld) for powerpc64le+elf, so the self-hosted
           # final-link path is never instantiated.
-          - patches/ppc64le/0001-arch-support-LdScript.zig.patch
-          # Phase 0002: Build Configuration (LLVM backend, library paths)
-          - patches/ppc64le/0002-build-config-build.zig.patch
-          - patches/ppc64le/0004-dl-iterate-phdr-no-pt-phdr-posix.zig.patch
+          - patches/ppc64le/LdScript.zig-arch-support.patch
+          # Build Configuration (LLVM backend, library paths)
+          - patches/ppc64le/build.zig-llvm-lld-config.patch
+          - patches/ppc64le/posix.zig-dl-iterate-phdr-no-pt-phdr.patch
       - if: not unix
         then:
           - patches/non_unix/build.zig-01-maxrss.patch
