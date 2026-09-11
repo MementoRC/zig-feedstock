@@ -9,8 +9,11 @@ context:
   llvm_src_version: "21.1.8"
   llvm_version: ${{ llvm_src_version | split(".") | first }}
 
+  # Build controls
+  bootstrap_native_rebuild: ${{ env.get("ZIG_BOOTSTRAP_NATIVE_REBUILD", default="0") == "1" or ppc64le }}
   bootstrap_via_upstream: false
-  bootstrap_native_rebuild: ${{ env.get("ZIG_BOOTSTRAP_NATIVE_REBUILD", default="1" if ppc64le else "0") == "1" }}
+  ci_focus_skip: ${{ not ppc64le }}  # TEMP triage PR 176, revert to 0 skip before merge
+  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" or ppc64le or riscv64 }}  # TEMP triage PR 176, revert riscv64 before merge
 
   # runs-on (cross-compiled) and generates-code-for (cross-compilers)
   xc_l64:        ${{ cross_target_platform_ == "linux-64" }}
@@ -151,10 +154,6 @@ context:
   is_cross_target: ${{ build_platform != target_platform and cross_target_platform_ == target_platform }}
   # x86_64 runs on the arm64 macOS runners via Rosetta 2; not symmetric.
   is_rosetta: ${{ build_platform == "osx-arm64" and target_platform == "osx-64" }}
-
-  # Single switch: also excludes lanes that cannot execute stage3 (see _can_run_stage3).
-  skip_langref: ${{ env.get("SKIP_LANGREF", default="0") == "1" or ppc64le or riscv64 or not (is_native or linux or is_rosetta) }}
-
   is_testable: ${{ not (build_platform in ["osx-64", "win-64"] and target_platform in ["osx-arm64", "win-arm64"]) }}
 
   # C shims run where the package installs, so build them for target_platform
@@ -289,7 +288,7 @@ outputs:
   - package:
       name: zig_impl_${{ cross_target_platform_ }}
     build:
-      skip: not (is_native or is_cross_target)
+      skip: ci_focus_skip or not (is_native or is_cross_target)
       dynamic_linking:
         rpath_allowlist:
           - if: osx
@@ -324,7 +323,7 @@ outputs:
           ZIG_SYSROOT_MODE: ${{ env.get("ZIG_SYSROOT_MODE", default="auto") }}
 
           # Derived from the single skip_langref switch above; do not re-add an env.get here.
-          SKIP_LANGREF: ${{ "1" if skip_langref else "0" }}
+          SKIP_LANGREF: ${{ "1" if skip_langref or is_native or linux or is_rosetta else "0" }}
 
           # Local debug switch.
           DEBUG_ZIG_BUILD: ${{ env.get("DEBUG_ZIG_BUILD", default="0") }}
@@ -368,12 +367,16 @@ outputs:
             - zig_impl_${{ build_platform }} ${{ abi_version }}.*
 
         # bootstrap_native_rebuild links clang_libs/lld_libs directly (static-llvm); llvmdev alone lacks them.
+        # gcc_impl/binutils_impl(build_platform) give a build-arch (not cross) gcc for zig's C++ glue.
         - if: bootstrap_native_rebuild
           then:
             - clangdev ${{ llvm_version }}.*
             - lld ${{ llvm_version }}.*
             - zlib
             - zstd
+            - libxml2-devel
+            - binutils_impl_${{ build_platform }} >=2.45
+            - gcc_impl_${{ build_platform }} >=14.3
       host:
         - clangdev ${{ llvm_version }}.*
         - libclang-cpp ${{ llvm_version }}.*
@@ -406,7 +409,7 @@ outputs:
           bin:
             - ${{ conda_triplet }}-zig
           files:
-            - if: not skip_langref
+            - if: not (skip_langref or is_native or linux or is_rosetta)
               then:
                 - ${{ library }}doc/langref.html
             - ${{ library }}lib/zig/{c,compiler_rt,fuzzer,ubsan_rt}.zig
@@ -632,7 +635,7 @@ outputs:
   - package:
       name: zig_${{ cross_target_platform_ }}
     build:
-      skip: not (is_native or is_cross_compiler or is_cross_target)
+      skip: ci_focus_skip or not (is_native or is_cross_compiler or is_cross_target)
       script:
         file: install_zig_activation.py
         env:
@@ -838,7 +841,7 @@ outputs:
   - package:
       name: zig
     build:
-      skip: cross_target_platform_ != target_platform
+      skip: ci_focus_skip or cross_target_platform_ != target_platform
       script:
         file: install_zig_symlinks.py
         env:
@@ -888,7 +891,7 @@ outputs:
   - package:
       name: zig-compiler
     build:
-      skip: cross_target_platform_ != target_platform
+      skip: ci_focus_skip or cross_target_platform_ != target_platform
       script: echo "zig-compiler metapackage"
     requirements:
       run:
