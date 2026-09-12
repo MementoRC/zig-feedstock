@@ -489,6 +489,31 @@ outputs:
           recipe:
             - testing/_test_utils.py
             - testing/test_dtneeded.py
+      # Regression test: dl_iterate_phdr must tolerate a missing PT_PHDR.
+      - script:
+          - if: linux
+            then:
+              - export QEMU_EXECVE="${QEMU_EXECVE:-$(command -v qemu-execve-${{ qemu_arch }} || true)}"
+              - export QEMU_LD_PREFIX="${PREFIX}${{ sysroot }}"
+              - export QEMU_EXECVE_NATIVE_PASSTHROUGH=1
+              - python testing/test_dl_iterate_phdr.py ${{ conda_triplet }} ${{ zig_triplet }}
+            else:
+              - echo "SKIP dl_iterate_phdr PT_PHDR test (non-linux)"
+        requirements:
+          build:
+            - python >=3.10
+            - if: build_platform != target_platform
+              then:
+                - ${{ qemu_pkg }}
+          run:
+            - if: linux
+              then:
+                - sysroot_${{ target_platform }}
+                - binutils_impl_${{ target_platform }}
+        files:
+          recipe:
+            - testing/_test_utils.py
+            - testing/test_dl_iterate_phdr.py
       # Functional test using triplet-prefixed binary
       - script:
           interpreter: brush
