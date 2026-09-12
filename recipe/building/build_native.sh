@@ -228,17 +228,8 @@ echo "[Stage 1] SUCCESS: ${STAGE1_ZIG}"
 echo "[Stage 1] Verify ZSTD support:"
 "${STAGE1_ZIG}" version
 
-# When BUILD_NATIVE_STAGE1_ONLY=1 (e.g., ppc64le bootstrap use-case), skip
-# Stage 2 doctest run and stash Stage 1 as the deliverable directly.
-#
-# Stash deliverable: copy the .real ELF binary AND install a wrapper that
-# (a) uses readlink to find its own location so it can locate its sibling
-# .real binary regardless of where TARGET_DIR is placed, and (b) bakes in
-# the absolute path to ${ENV_DIR}/lib for LD_LIBRARY_PATH. The original
-# patchelf --set-rpath '$ORIGIN/../lib' was incorrect for this deployment
-# layout (TARGET_DIR has no ../lib sibling); the libs actually live in
-# build_native.sh's mamba env at ${ENV_DIR}/lib, which persists for the
-# remainder of the build inside _native_build_tmp.
+# BUILD_NATIVE_STAGE1_ONLY=1 skips Stage 2 and stashes Stage 1 as the
+# deliverable directly (wrapper + .real binary). See reference doc S5.
 if [[ "${BUILD_NATIVE_STAGE1_ONLY:-0}" == "1" ]]; then
     echo "[build_native] BUILD_NATIVE_STAGE1_ONLY=1 — skipping Stage 2 doctest run"
     mkdir -p "${TARGET_DIR}"

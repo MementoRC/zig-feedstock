@@ -6,13 +6,8 @@
 source "${RECIPE_DIR}/building/_common.sh"
 
 function generate_mingw_import_libs() {
-  # Workaround for ziglang/zig#14919: add synchronization.def so zig can generate
-  # libsynchronization.a when cross-compiling to Windows (consumers using -lsynchronization).
-  # IMPORTANT: LIBRARY must be api-ms-win-core-synch-l1-2-0.dll, NOT synchronization.dll.
-  # "synchronization.dll" is neither a real DLL on disk nor a valid API Set Schema name -- it doesn't
-  # exist as a physical file in Windows or MSYS2. The real MinGW-w64 alias points to
-  # libapi-ms-win-core-synch-l1-2-0.a, whose LIBRARY directive is api-ms-win-core-synch-l1-2-0.dll.
-  # Windows API Set Schema resolves api-ms-win-* names to the actual host DLL at runtime.
+  # Workaround for ziglang/zig#14919: synchronization.def is absent upstream.
+  # Rationale: reference doc S4.
   if is_not_unix; then
     _zig_lib="${PREFIX}/Library/lib/zig"
   else
@@ -143,9 +138,7 @@ SYNCHRONIZATION_DEF
       _gen_fail=0
       _gen_failed=""
 
-      # Stems that are macro-fragment include helpers (not standalone DLL
-      # defs); zig ships these in its own mingw lib dir and dlltool cannot
-      # produce import libs from them. See PR #181 ac523b5b.
+      # Macro-fragment include-helper stems (not standalone DLL defs). See reference doc S5.6/S3.11.
       function _is_helper_stem() {
         case "$1" in
           func|crt-aliases|ucrtbase-common|vcruntime140-common) return 0 ;;
@@ -329,9 +322,7 @@ SYNCHRONIZATION_DEF
         echo "ERROR: [_mingw] failed import libs:${_gen_failed}" >&2
         return 1
       fi
-      # Floor subsumes the old ==0 check. Baseline 2355 measured on
-      # PR #181 / ac523b5b; 2200 leaves room for a snapshot legitimately
-      # adding/removing a handful of .def files while still catching a collapse.
+      # Floor guards against an import-lib generation collapse. See reference doc S5.6/S3.11.
       _gen_count_floor=2200
       if [[ "${_gen_count}" -lt "${_gen_count_floor}" ]]; then
         echo "ERROR: [_mingw] import lib count ${_gen_count} is below floor ${_gen_count_floor} (baseline 2355 measured on PR #181 / ac523b5b)" >&2

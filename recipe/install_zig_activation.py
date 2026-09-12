@@ -370,18 +370,10 @@ def install_zig_cc_wrappers(
     # Strip glibc version for cc/c++ target (clang rejects ".2.17" suffix)
     # llvm.zig-triple-no-glibc-version.patch stops it reaching LLVM's triple.
     cc_target = zig_triplet
-    # Windows: the wrapper should target the mingw (gnu) ABI whose CRT this
-    # recipe builds and ships. zig_triplet carries the msvc spelling because
-    # it also sets -DZIG_TARGET_TRIPLE for the zig_impl build itself, where
-    # msvc is correct. Only the wrapper's compile target is rewritten here.
-    #
-    # SCOPED TO aarch64 DELIBERATELY. gnu is believed correct for all three
-    # Windows targets, but rewriting win-32 to x86-windows-gnu REGRESSED
-    # win_64->win-32 in CI (dac78f61, job 102105297731): lld-link undefined
-    # _WinMain@16 via libmingw32.lib(crtexewin.obj), a GNU-CRT-only path that
-    # cannot occur under msvc. That lane was green at msvc, so win-32 stays
-    # msvc until the WinMain/crtexewin root cause is understood. aarch64 keeps
-    # the rewrite: it is the target whose msvc CRT mismatch was measured.
+    # Windows: rewrite the wrapper's compile target to gnu ABI (mingw) while
+    # zig_triplet keeps msvc for -DZIG_TARGET_TRIPLE on the zig_impl build.
+    # Scoped to aarch64 only: win-32 deliberately stays msvc after a measured
+    # lld-link regression (undefined WinMain) from rewriting it to gnu.
     if cc_target.startswith("aarch64-"):
         cc_target = cc_target.replace("-windows-msvc", "-windows-gnu")
     zig_bin = _find_zig_bin(conda_triplet, is_nonunix=is_nonunix)

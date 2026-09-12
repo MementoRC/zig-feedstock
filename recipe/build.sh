@@ -228,24 +228,16 @@ fi
 
 # --- Post CMake Configuration ---
 
-# Append extra link deps to config.h (cmake doesn't know about conda's split packaging)
-# Append LLVM deps that conda's split packaging doesn't bake into
-# config.h's ZIG_LLVM_LIBRARIES: zlib (adler32 refs in lld-ELF),
-# zstd (compression), libxml2. Needed on every native + cross linux
-# build — linux-aarch64 failed linking zig2 with undefined adler32
-# when this was gated on `is_cross`.
+# Append zlib/zstd/libxml2 to config.h's ZIG_LLVM_LIBRARIES: conda's split
+# packaging doesn't bake them in. Needed on every linux build.
 is_linux && _cfg_subst "${cmake_build_dir}/config.h" '(ZIG_LLVM_LIBRARIES ".*)"' '\1;-lzstd;-lxml2;-lz"'
 # Cross builds resolve LLVM on the build machine, so config.h's ZIG_LLVM_* paths
-# point into ${BUILD_PREFIX} — the wrong architecture. Windows needs the literal
-# form: CMake writes native paths (C:/… or C:\…), ${BUILD_PREFIX} is MSYS (/c/…).
+# point into ${BUILD_PREFIX} -- the wrong architecture. Windows needs the literal
+# form: CMake writes native paths (C:/... or C:\...), ${BUILD_PREFIX} is MSYS (/c/...).
 is_osx      && is_cross && _cfg_subst     "${cmake_build_dir}/config.h" "(ZIG_LLVM_\\w+ \")${BUILD_PREFIX}" "\\1${PREFIX}"
 is_not_unix && is_cross && _cfg_subst_lit "${cmake_build_dir}/config.h" "${BUILD_PREFIX}" "${PREFIX}"
-# Note: do NOT inject ${PREFIX}/lib/libc++.dylib into ZIG_LLVM_LIBRARIES on macOS.
-# build.zig sets mod.link_libcpp = true for darwin targets, which (via patches/
-# Lld.zig-prefer-shared-libcxx.patch) already resolves to ${PREFIX}/lib/libc++.1.dylib.
-# Injecting libc++.dylib here would add a second LC_LOAD_DYLIB to the same dylib;
-# macOS SDK >= 26 dyld aborts on duplicate linked dylibs ("duplicate linked dylib
-# '@rpath/libc++.1.dylib'" — Abort trap: 6).
+# Do NOT inject ${PREFIX}/lib/libc++.dylib into ZIG_LLVM_LIBRARIES on macOS:
+# duplicate LC_LOAD_DYLIB, dyld aborts on SDK >= 26. See reference doc S8.
 
 # zig2.c (the pre-generated C bootstrap from 0.16) calls getrandom,
 # copy_file_range, and statx — all absent from conda-forge's glibc 2.17
