@@ -36,12 +36,13 @@ INDEX_URL = "https://ziglang.org/download/index.json"
 
 # conda-forge build_platform -> ziglang.org/download/index.json platform key
 BOOTSTRAP_PLATFORM_MAP = {
-    "osx-arm64": "aarch64-macos",
-    "osx-64": "x86_64-macos",
-    "win-64": "x86_64-windows",
-    "linux-64": "x86_64-linux",
+    "osx-arm64":     "aarch64-macos",
+    "osx-64":        "x86_64-macos",
+    "win-64":        "x86_64-windows",
+    "linux-64":      "x86_64-linux",
     "linux-aarch64": "aarch64-linux",
     "linux-ppc64le": "powerpc64le-linux",
+    "win-arm64":     "aarch64-windows",
 }
 
 
