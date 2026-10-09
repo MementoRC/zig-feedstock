@@ -25,8 +25,9 @@ jobs:
         include:
           - branch: dev
             channel: master
-          - branch: experimental
-            channel: release
+          # experimental disabled for now; uncomment to re-enable
+          # - branch: experimental
+          #   channel: release
     steps:
       - name: Checkout this repo (for the bump script)
         uses: actions/checkout@v7
