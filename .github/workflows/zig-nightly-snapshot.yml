@@ -49,6 +49,10 @@ jobs:
         id: bump
         run: python3 .github/scripts/bump_snapshot.py upstream/recipe/recipe.yaml --channel ${{ matrix.channel }}
 
+      - name: Install relevancy gate dependencies
+        if: steps.bump.outputs.changed == 'true'
+        run: pip install pyyaml
+
       - name: Run patch-relevancy gate
         if: steps.bump.outputs.changed == 'true'
         id: relevancy
@@ -59,7 +63,7 @@ jobs:
             echo 'relevancy<<EOF'
             for p in $RELEVANCY_PLATFORMS; do
               echo "### $p"
-              bash recipe/ci_support/check_patch_relevancy.sh "$p"
+              bash ../.github/scripts/check_patch_relevancy.sh "$p"
               echo
             done
             echo 'EOF'
