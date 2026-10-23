@@ -90,6 +90,7 @@ jobs:
             --body "Automated zig ${{ matrix.channel }} version bump.
 
           - version: ${{ steps.bump.outputs.old_version }} -> ${{ steps.bump.outputs.new_version }}
+          - build_number: ${{ steps.bump.outputs.old_build_number }} -> ${{ steps.bump.outputs.new_build_number }}
           - tarball: ${{ steps.bump.outputs.tarball_url }}
           - sha256: ${{ steps.bump.outputs.sha256 }}
           - bootstrap sha256s patched: ${{ steps.bump.outputs.bootstrap_patched }}

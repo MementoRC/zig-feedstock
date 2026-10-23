@@ -6,6 +6,10 @@ Two channels:
                       "master" key, version like "0.17.0-dev.NNNN+hash").
                       Patches context.version, context.snapshot, and the
                       sha256 following the ziglang.org/builds/... source url.
+                      Also patches context.build_number to <ordinal>0 (rev 0
+                      of the new snapshot; see the feedstock's build-number
+                      scheme). snapshot_ref/build_ref name the bootstrap and
+                      deliberately lag, so they are never touched.
   --channel release - stable release tracking (index.json's highest
                       non-"master" top-level version key). Patches
                       context.version and the sha256 following the
@@ -83,6 +87,40 @@ def patch_context_block(lines, key, new_value):
             m = pattern.match(line)
             if m:
                 lines[i] = f'{m.group(1)}"{new_value}"{m.group(2)}'
+                return True
+    return False
+
+
+def read_context_int(lines, key):
+    """Return the int value of an unquoted `key: N` line in context:, or None."""
+    in_context = False
+    pattern = re.compile(rf"^\s*{key}:\s*(\d+)\s*$")
+    for line in lines:
+        if re.match(r"^context:\s*$", line):
+            in_context = True
+            continue
+        if in_context and re.match(r"^\S", line):
+            break
+        if in_context:
+            m = pattern.match(line)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def patch_context_int(lines, key, value):
+    in_context = False
+    pattern = re.compile(rf"^(\s*{key}:\s*)\d+(\s*)$")
+    for i, line in enumerate(lines):
+        if re.match(r"^context:\s*$", line):
+            in_context = True
+            continue
+        if in_context and re.match(r"^\S", line):
+            break
+        if in_context:
+            m = pattern.match(line)
+            if m:
+                lines[i] = f"{m.group(1)}{value}{m.group(2)}"
                 return True
     return False
 
@@ -167,6 +205,11 @@ def main():
         print("error: could not locate snapshot in context: block for master channel", file=sys.stderr)
         return 2
 
+    old_build_number = read_context_int(lines, "build_number")
+    if channel == "master" and old_build_number is None:
+        print("error: could not locate build_number in context: block for master channel", file=sys.stderr)
+        return 2
+
     data = fetch_index()
     if channel == "master":
         new_version, new_snapshot, entry = target_master(data)
@@ -202,6 +245,15 @@ def main():
         if not patch_context_block(lines, "snapshot", new_snapshot):
             print("error: failed to patch snapshot in context block", file=sys.stderr)
             return 1
+        ordinal = new_snapshot.partition("+")[0]
+        if not ordinal.isdigit():
+            print(f"error: snapshot ordinal not numeric: {new_snapshot!r}", file=sys.stderr)
+            return 1
+        new_build_number = int(ordinal) * 10
+        if not patch_context_int(lines, "build_number", new_build_number):
+            print("error: failed to patch build_number in context block", file=sys.stderr)
+            return 1
+        print(f"build_number: {old_build_number} -> {new_build_number}")
     if not patch_sha256(lines, url_substrings, shasum):
         print("error: failed to patch sha256 after source url", file=sys.stderr)
         return 1
@@ -219,6 +271,9 @@ def main():
             f.write(f"old_snapshot={old_snapshot or ''}\n")
             f.write(f"new_version={new_version}\n")
             f.write(f"new_snapshot={new_snapshot or ''}\n")
+            if channel == "master":
+                f.write(f"old_build_number={old_build_number}\n")
+                f.write(f"new_build_number={new_build_number}\n")
             f.write(f"old_id={old_id}\n")
             f.write(f"new_id={new_id}\n")
             f.write(f"tarball_url={tarball_url}\n")
