@@ -51,6 +51,10 @@
 #                      to the recipe's current snapshot, not the override.
 #   --keep            do not delete the temp workdir on exit (prints its path)
 #
+# ENVIRONMENT
+#   KEEP_TREE=<dir>   copy the patched source tree into <dir> after the patch loop
+#                      (used by probe_bootstrap.sh)
+#
 # EXIT STATUS
 #   0   all patches in the effective sequence applied cleanly (CLEAN/OFFSET/FUZZ)
 #   1   at least one patch FAILed, or a setup step (download/extract/sha256) failed
@@ -430,6 +434,10 @@ for rel_patch in "${PATCHES[@]}"; do
   RESULT_PATCH+=("${rel_patch}")
   RESULT_STATUS+=("${status}")
 done
+
+if [[ -n "${KEEP_TREE:-}" ]]; then
+  cp -a "${ZIG_SOURCE}/." "${KEEP_TREE}/"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 5: summary
