@@ -7,7 +7,7 @@ env:
   ZV: 0.18.0-dev.828+9da287565
 jobs:
   cross:
-    name: build zig.exe on ${{ matrix.host }}
+    name: build no-LLVM zig.exe on ${{ matrix.host }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,30 +31,83 @@ jobs:
       - name: cross-build zig for x86_64-windows-gnu (no LLVM)
         run: |
           micromamba list zig
-          zig version
           curl -fsSL -o src.tar.xz "https://ziglang.org/builds/zig-$ZV.tar.xz"
           mkdir src
           tar -xf src.tar.xz -C src --strip-components=1
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
           cd src
-          grep -n '8_000_000_000' build.zig || true
           sed -i.bak 's/8_000_000_000/7_000_000_000/g' build.zig
           time zig build -Dtarget=x86_64-windows-gnu -Denable-llvm=false -Doptimize=ReleaseSafe \
             -Dno-langref -Dversion-string="$ZV" --prefix "$GITHUB_WORKSPACE/win"
-          ls -la "$GITHUB_WORKSPACE/win/bin"
           file "$GITHUB_WORKSPACE/win/bin/zig.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: zig-win-from-${{ matrix.host }}
           path: win
+  native:
+    name: build no-LLVM zig.exe natively on windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: build with the official zig.exe
+        run: |
+          curl -fsSL -o z.zip "https://ziglang.org/builds/zig-x86_64-windows-$ZV.zip"
+          7z x -y z.zip > /dev/null
+          curl -fsSL -o src.tar.xz "https://ziglang.org/builds/zig-$ZV.tar.xz"
+          mkdir src
+          tar -xf src.tar.xz -C src --strip-components=1
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
+          ZO="$PWD/zig-x86_64-windows-$ZV/zig.exe"
+          cd src
+          time "$ZO" build -Denable-llvm=false -Doptimize=ReleaseSafe \
+            -Dno-langref -Dversion-string="$ZV" --prefix "$GITHUB_WORKSPACE/win"
+          ls -la "$GITHUB_WORKSPACE/win/bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-win-from-native
+          path: win
+  bootstrap:
+    name: zig-bootstrap LLVM cross on ${{ matrix.host }}
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux
+            os: ubuntu-latest
+          - host: osx
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: tools
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install ninja cmake || true; else sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build cmake; fi
+      - name: clone zig-bootstrap
+        run: |
+          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git zb || git clone --depth 1 https://github.com/ziglang/zig-bootstrap.git zb
+          cd zb && git log -1 --format='zig-bootstrap %H %cd' && grep -m1 -i 'version' zig/build.zig.zon || true
+      - name: build x86_64-windows-gnu
+        run: |
+          cd zb
+          time ./build x86_64-windows-gnu baseline > "$RUNNER_TEMP/zb.log" 2>&1
+          rc=$?
+          tail -n 40 "$RUNNER_TEMP/zb.log"
+          ls -la out || true
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-win-from-bootstrap-${{ matrix.host }}
+          path: zb/out/zig-x86_64-windows-gnu-baseline
   wintest:
     name: run zig.exe (${{ matrix.src }}) on windows
-    needs: cross
+    needs: [cross, native]
     if: always()
     strategy:
       fail-fast: false
       matrix:
-        src: [linux, osx, official]
+        src: [linux, osx, native, official]
     runs-on: windows-latest
     defaults:
       run:
@@ -65,17 +118,18 @@ jobs:
         with:
           name: zig-win-from-${{ matrix.src }}
           path: win
-      - name: fetch official zig
-        if: matrix.src == 'official'
+      - if: matrix.src == 'official'
         run: |
           curl -fsSL -o z.zip "https://ziglang.org/builds/zig-x86_64-windows-$ZV.zip"
           7z x -y z.zip > /dev/null
+          mv "zig-x86_64-windows-$ZV" win
       - name: version, env, hello
         run: |
-          if [ "${{ matrix.src }}" = official ]; then ZE="$PWD/zig-x86_64-windows-$ZV/zig.exe"; else ZE="$PWD/win/bin/zig.exe"; fi
+          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1)
           "$ZE" version
           "$ZE" env
           printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from {s} zig.exe\\n", .{"${{ matrix.src }}"});\n}\n' > hello.zig
+          printf '#include <stdio.h>\nint main(void) { puts("hello from C via ${{ matrix.src }} zig cc"); return 0; }\n' > hello.c
           set +e
           "$ZE" build-exe -target x86_64-windows -fno-llvm -fno-lld -femit-bin=hello_win.exe hello.zig
           rcw=$?
@@ -83,5 +137,40 @@ jobs:
           [ -f hello_win.exe ] && ./hello_win.exe
           "$ZE" build-exe -target x86_64-linux -fno-llvm -fno-lld -femit-bin=hello_lnx hello.zig
           echo "build-exe x86_64-linux (self-hosted) rc=$?"
-          [ -f hello_lnx ] && file hello_lnx
+          "$ZE" cc -target x86_64-windows-gnu -o hello_c.exe hello.c
+          echo "zig cc x86_64-windows-gnu rc=$?"
+          [ -f hello_c.exe ] && ./hello_c.exe
           exit $rcw
+  wintest-bootstrap:
+    name: run zig.exe (bootstrap-${{ matrix.host }}) on windows
+    needs: bootstrap
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [linux, osx]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zig-win-from-bootstrap-${{ matrix.host }}
+          path: win
+      - name: version, hello (LLVM), zig cc
+        run: |
+          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1)
+          "$ZE" version
+          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from bootstrap {s} zig.exe\\n", .{"${{ matrix.host }}"});\n}\n' > hello.zig
+          printf '#include <stdio.h>\nint main(void) { puts("hello from C via bootstrap ${{ matrix.host }} zig cc"); return 0; }\n' > hello.c
+          set +e
+          "$ZE" build-exe -target x86_64-windows -femit-bin=hello_win.exe hello.zig
+          rcw=$?
+          echo "build-exe x86_64-windows (LLVM) rc=$rcw"
+          [ -f hello_win.exe ] && ./hello_win.exe
+          "$ZE" cc -target x86_64-windows-gnu -o hello_c.exe hello.c
+          rcc=$?
+          echo "zig cc x86_64-windows-gnu rc=$rcc"
+          [ -f hello_c.exe ] && ./hello_c.exe
+          exit $(( rcw | rcc ))
