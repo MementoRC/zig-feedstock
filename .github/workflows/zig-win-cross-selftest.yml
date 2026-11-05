@@ -75,8 +75,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - host: linux
-            os: ubuntu-latest
           - host: osx
             os: macos-14
     runs-on: ${{ matrix.os }}
@@ -148,7 +146,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        host: [linux, osx]
+        host: [osx]
     runs-on: windows-latest
     defaults:
       run:
