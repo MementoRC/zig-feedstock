@@ -37,6 +37,8 @@ jobs:
           tar -xf src.tar.xz -C src --strip-components=1
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
           cd src
+          grep -n '8_000_000_000' build.zig || true
+          sed -i.bak 's/8_000_000_000/7_000_000_000/g' build.zig
           time zig build -Dtarget=x86_64-windows-gnu -Denable-llvm=false -Doptimize=ReleaseSafe \
             -Dno-langref -Dversion-string="$ZV" --prefix "$GITHUB_WORKSPACE/win"
           ls -la "$GITHUB_WORKSPACE/win/bin"
@@ -73,7 +75,7 @@ jobs:
           if [ "${{ matrix.src }}" = official ]; then ZE="$PWD/zig-x86_64-windows-$ZV/zig.exe"; else ZE="$PWD/win/bin/zig.exe"; fi
           "$ZE" version
           "$ZE" env
-          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from %s zig.exe\\n", .{"${{ matrix.src }}"});\n}\n' > hello.zig
+          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from {s} zig.exe\\n", .{"${{ matrix.src }}"});\n}\n' > hello.zig
           set +e
           "$ZE" build-exe -target x86_64-windows -fno-llvm -fno-lld -femit-bin=hello_win.exe hello.zig
           rcw=$?
