@@ -220,16 +220,17 @@ jobs:
         run: |
           set +e
           rc=0
-          micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23.1" "clangdev=23.1" "lld=23.1" zstd zlib libxml2 || rc=$?
+          micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23.1" "clangdev=23.1" "lld=23.1" zstd zlib libxml2 libxml2-devel || rc=$?
           echo "create rc=$rc"
           if [ "$rc" -ne 0 ]; then
             micromamba search --platform win-64 -c conda-forge 'clangdev=23*' | tail -n 20
             micromamba search --platform win-64 -c conda-forge 'lld=23*' | tail -n 20
             rc=0
-            micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23" "clangdev=23" "lld=23" zstd zlib libxml2 || rc=$?
+            micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23" "clangdev=23" "lld=23" zstd zlib libxml2 libxml2-devel || rc=$?
             echo "retry create rc=$rc"
           fi
-          ls "$RUNNER_TEMP/winpfx/Library/lib" | grep -i -E '^(LLVM|clang|lld|zstd|z|zlib|xml|libxml)' | sort
+          ls "$RUNNER_TEMP/winpfx/Library/lib" | grep -i -E '^(LLVM-C|lld|zstd|z|zlib|xml|libxml|iconv|libiconv|charset|libcharset|lzma|liblzma)' | sort
+          ls "$RUNNER_TEMP/winpfx/Library/bin" | grep -i -E '\.dll$' | grep -i -E 'xml|zstd|zlib|iconv|charset|lzma|icu' | sort
           grep -E 'LLVM_VERSION|LLVM_DEFAULT_TARGET' "$RUNNER_TEMP/winpfx/Library/include/llvm/Config/llvm-config.h"
           exit $rc
       - name: fetch zig source and inspect msvc handling
@@ -249,6 +250,10 @@ jobs:
           sed -i 's/"-std=c++17",/"-std=c++17", "-fms-runtime-lib=dll",/' build.zig
           echo "ms-runtime-lib lines: $(grep -c 'fms-runtime-lib=dll' build.zig)"
           grep -n 'fms-runtime-lib=dll' build.zig
+          grep -n -B2 -A2 '"zstd"' build.zig
+          sed -i 's/^\(.*\)linkSystemLibrary("zstd"\(.*\)$/&\n\1linkSystemLibrary("libxml2"\2/' build.zig
+          echo "libxml2 link lines: $(grep -c 'linkSystemLibrary("libxml2"' build.zig)"
+          grep -n -B1 -A1 'linkSystemLibrary("libxml2"' build.zig
           grep -n -E 'include_dir|sys_include_dir|crt_dir|msvc_lib_dir|kernel32_lib_dir|cc_dir|may not be empty|must be empty' lib/std/zig/LibCInstallation.zig | head -60
           grep -n -i -E 'msvc|link_libcpp|linkLibCpp|static.llvm|search.prefix|config_h' build.zig | head -80
           exit 0
@@ -275,6 +280,7 @@ jobs:
         run: |
           set +e
           if [ -f "$RUNNER_TEMP/zig-out/bin/zig.exe" ]; then
+            for d in "$RUNNER_TEMP"/winpfx/Library/bin/*.dll; do case "$(basename "$d" | tr 'A-Z' 'a-z')" in *xml*|*zstd*|*zlib*|*iconv*|*charset*|*lzma*|icu*) cp -v "$d" "$RUNNER_TEMP/zig-out/bin/";; esac; done
             sudo apt-get install -y -qq llvm
             llvm-readobj --coff-imports "$RUNNER_TEMP/zig-out/bin/zig.exe" | grep -i 'Name:' | sort -u
             ls -la "$RUNNER_TEMP/zig-out/bin"
