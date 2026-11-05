@@ -245,6 +245,10 @@ jobs:
           sed -i 's/^\( *\)exe\.stack_size = stack_size;$/&\n\1if (exe.rootModuleTarget().os.tag == .windows and exe.rootModuleTarget().abi == .msvc) exe.linkage = .dynamic;/' build.zig
           echo "dynamic-crt lines: $(grep -c 'exe.linkage = .dynamic' build.zig)"
           grep -n -B1 'exe.linkage = .dynamic' build.zig
+          grep -n '"-std=c++17",' build.zig
+          sed -i 's/"-std=c++17",/"-std=c++17", "-fms-runtime-lib=dll",/' build.zig
+          echo "ms-runtime-lib lines: $(grep -c 'fms-runtime-lib=dll' build.zig)"
+          grep -n 'fms-runtime-lib=dll' build.zig
           grep -n -E 'include_dir|sys_include_dir|crt_dir|msvc_lib_dir|kernel32_lib_dir|cc_dir|may not be empty|must be empty' lib/std/zig/LibCInstallation.zig | head -60
           grep -n -i -E 'msvc|link_libcpp|linkLibCpp|static.llvm|search.prefix|config_h' build.zig | head -80
           exit 0
