@@ -179,3 +179,142 @@ jobs:
           echo "zig cc x86_64-windows-gnu rc=$rcc"
           [ -f hello_c.exe ] && ./hello_c.exe
           exit $(( rcw | rcc ))
+  msvc-xwin:
+    name: build LLVM zig.exe for windows-msvc on linux (xwin)
+    timeout-minutes: 150
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: zenv
+          init-shell: bash
+          create-args: >-
+            -c conda-forge/label/zig_dev -c conda-forge
+            zig=0.18.0=*_8281
+      - name: fetch xwin and splat the MSVC CRT and SDK
+        run: |
+          set +e
+          curl -fsSL -H "Authorization: Bearer ${{ github.token }}" -o rel.json https://api.github.com/repos/Jake-Shadle/xwin/releases/latest
+          echo "release api rc=$?"
+          grep -m1 '"tag_name"' rel.json
+          URL=$(grep -o 'https://[^"]*x86_64-unknown-linux-musl\.tar\.gz' rel.json | head -n 1)
+          echo "asset: $URL"
+          mkdir xwin-dl
+          curl -fsSL "$URL" | tar -xz -C xwin-dl --strip-components=1
+          echo "extract rc=$?"
+          find xwin-dl -type f
+          XW=$(find "$PWD/xwin-dl" -type f -name xwin | head -n 1)
+          "$XW" --version
+          rc=0
+          "$XW" --accept-license splat --output "$RUNNER_TEMP/xwin" || rc=$?
+          echo "xwin splat rc=$rc"
+          find "$RUNNER_TEMP/xwin" -maxdepth 4 -type d | sort | head -80
+          exit $rc
+      - name: create win-64 LLVM prefix without running it
+        run: |
+          set +e
+          rc=0
+          micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23.1" "clangdev=23.1" "lld=23.1" zstd zlib libxml2 || rc=$?
+          echo "create rc=$rc"
+          if [ "$rc" -ne 0 ]; then
+            micromamba search --platform win-64 -c conda-forge 'clangdev=23*' | tail -n 20
+            micromamba search --platform win-64 -c conda-forge 'lld=23*' | tail -n 20
+            rc=0
+            micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge "llvmdev=23" "clangdev=23" "lld=23" zstd zlib libxml2 || rc=$?
+            echo "retry create rc=$rc"
+          fi
+          ls "$RUNNER_TEMP/winpfx/Library/lib" | grep -i -E '^(LLVM|clang|lld|zstd|z|zlib|xml|libxml)' | sort
+          grep -E 'LLVM_VERSION|LLVM_DEFAULT_TARGET' "$RUNNER_TEMP/winpfx/Library/include/llvm/Config/llvm-config.h"
+          exit $rc
+      - name: fetch zig source and inspect msvc handling
+        run: |
+          set +e
+          micromamba list zig
+          curl -fsSL -o src.tar.xz "https://ziglang.org/builds/zig-$ZV.tar.xz"
+          mkdir src
+          tar -xf src.tar.xz -C src --strip-components=1
+          cd src
+          sed -i.bak 's/8_000_000_000/7_000_000_000/g' build.zig
+          grep -n -E 'include_dir|sys_include_dir|crt_dir|msvc_lib_dir|kernel32_lib_dir' lib/std/zig/LibCInstallation.zig | head -60
+          grep -n -i -E 'msvc|link_libcpp|linkLibCpp|static.llvm|search.prefix|config_h' build.zig | head -80
+          exit 0
+      - name: write libc file
+        run: |
+          X="$RUNNER_TEMP/xwin"
+          printf 'include_dir=%s/sdk/include/ucrt\nsys_include_dir=%s/crt/include\ncrt_dir=%s/sdk/lib/ucrt/x86_64\nmsvc_lib_dir=%s/crt/lib/x86_64\nkernel32_lib_dir=%s/sdk/lib/um/x86_64\ngcc_dir=\n' "$X" "$X" "$X" "$X" "$X" > "$RUNNER_TEMP/libc-msvc.txt"
+          cat "$RUNNER_TEMP/libc-msvc.txt"
+      - name: build LLVM zig.exe for x86_64-windows-msvc
+        run: |
+          set +e
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc" ZIG_LIBC="$RUNNER_TEMP/libc-msvc.txt"
+          cd src
+          rc=0
+          time zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe -Denable-llvm -Dstatic-llvm \
+            --search-prefix "$RUNNER_TEMP/winpfx/Library" --libc "$RUNNER_TEMP/libc-msvc.txt" \
+            -Dversion-string="$ZV" --prefix "$RUNNER_TEMP/zig-out" > "$RUNNER_TEMP/msvc-build.log" 2>&1 || rc=$?
+          echo "build rc=$rc"
+          echo "BUILD_RC=$rc" >> "$GITHUB_ENV"
+          tail -n 150 "$RUNNER_TEMP/msvc-build.log"
+          grep -n -i -E 'error|undefined|unresolved|lld-link' "$RUNNER_TEMP/msvc-build.log" | head -80
+          exit 0
+      - name: inspect zig.exe
+        run: |
+          set +e
+          if [ -f "$RUNNER_TEMP/zig-out/bin/zig.exe" ]; then
+            sudo apt-get install -y -qq llvm
+            llvm-readobj --coff-imports "$RUNNER_TEMP/zig-out/bin/zig.exe" | grep -i 'Name:' | sort -u
+            ls -la "$RUNNER_TEMP/zig-out/bin"
+          else
+            echo "no zig.exe produced"
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-win-msvc-xwin
+          path: ${{ runner.temp }}/zig-out
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msvc-build-log
+          path: ${{ runner.temp }}/msvc-build.log
+          if-no-files-found: ignore
+      - name: exit with build rc
+        run: exit "${BUILD_RC:-1}"
+  wintest-msvc:
+    name: run zig.exe (msvc-xwin) on windows
+    needs: msvc-xwin
+    if: always()
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zig-win-msvc-xwin
+          path: win
+      - name: version, env, hello (LLVM), zig cc
+        run: |
+          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1 || true)
+          "$ZE" version
+          "$ZE" env
+          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from msvc-xwin zig.exe\\n", .{});\n}\n' > hello.zig
+          printf '#include <stdio.h>\nint main(void) { puts("hello from C via msvc-xwin zig cc"); return 0; }\n' > hello.c
+          set +e
+          "$ZE" build-exe -target x86_64-windows -femit-bin=hello_win.exe hello.zig
+          rcw=$?
+          echo "build-exe x86_64-windows (LLVM) rc=$rcw"
+          [ -f hello_win.exe ] && ./hello_win.exe
+          "$ZE" build-exe -target x86_64-linux -femit-bin=hello_lnx hello.zig
+          echo "build-exe x86_64-linux (LLVM) rc=$?"
+          "$ZE" cc -target x86_64-windows-gnu -o hello_c.exe hello.c
+          echo "zig cc x86_64-windows-gnu rc=$?"
+          [ -f hello_c.exe ] && ./hello_c.exe
+          "$ZE" cc -target x86_64-windows-msvc -o hello_m.exe hello.c
+          echo "zig cc x86_64-windows-msvc rc=$?"
+          [ -f hello_m.exe ] && ./hello_m.exe
+          exit $rcw
