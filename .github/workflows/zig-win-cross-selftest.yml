@@ -89,11 +89,18 @@ jobs:
       - name: build x86_64-windows-gnu
         run: |
           cd zb
-          time ./build x86_64-windows-gnu baseline > "$RUNNER_TEMP/zb.log" 2>&1
-          rc=$?
-          tail -n 40 "$RUNNER_TEMP/zb.log"
+          rc=0
+          time ./build x86_64-windows-gnu baseline > "$RUNNER_TEMP/zb.log" 2>&1 || rc=$?
+          tail -n 150 "$RUNNER_TEMP/zb.log"
+          grep -n -i -E 'error|FAILED' "$RUNNER_TEMP/zb.log" | tail -n 60 || true
           ls -la out || true
           exit $rc
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zb-log
+          path: ${{ runner.temp }}/zb.log
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: zig-win-from-bootstrap-${{ matrix.host }}
@@ -123,7 +130,7 @@ jobs:
           mv "zig-x86_64-windows-$ZV" win
       - name: version, env, hello
         run: |
-          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1)
+          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1 || true)
           "$ZE" version
           "$ZE" env
           printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from {s} zig.exe\\n", .{"${{ matrix.src }}"});\n}\n' > hello.zig
@@ -158,7 +165,7 @@ jobs:
           path: win
       - name: version, hello (LLVM), zig cc
         run: |
-          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1)
+          ZE=$(ls "$PWD"/win/bin/zig.exe "$PWD"/win/zig.exe 2>/dev/null | head -n 1 || true)
           "$ZE" version
           printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from bootstrap {s} zig.exe\\n", .{"${{ matrix.host }}"});\n}\n' > hello.zig
           printf '#include <stdio.h>\nint main(void) { puts("hello from C via bootstrap ${{ matrix.host }} zig cc"); return 0; }\n' > hello.c
