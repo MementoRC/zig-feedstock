@@ -1,0 +1,85 @@
+name: zig win cross selftest
+on:
+  push:
+    branches: [scratch/zig-win-cross-selftest]
+  workflow_dispatch:
+env:
+  ZV: 0.18.0-dev.828+9da287565
+jobs:
+  cross:
+    name: build zig.exe on ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux
+            os: ubuntu-latest
+          - host: osx
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: zenv
+          init-shell: bash
+          create-args: >-
+            -c conda-forge/label/zig_dev -c conda-forge
+            zig=0.18.0=*_8281
+      - name: cross-build zig for x86_64-windows-gnu (no LLVM)
+        run: |
+          micromamba list zig
+          zig version
+          curl -fsSL -o src.tar.xz "https://ziglang.org/builds/zig-$ZV.tar.xz"
+          mkdir src
+          tar -xf src.tar.xz -C src --strip-components=1
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
+          cd src
+          time zig build -Dtarget=x86_64-windows-gnu -Denable-llvm=false -Doptimize=ReleaseSafe \
+            -Dno-langref -Dversion-string="$ZV" --prefix "$GITHUB_WORKSPACE/win"
+          ls -la "$GITHUB_WORKSPACE/win/bin"
+          file "$GITHUB_WORKSPACE/win/bin/zig.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-win-from-${{ matrix.host }}
+          path: win
+  wintest:
+    name: run zig.exe (${{ matrix.src }}) on windows
+    needs: cross
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        src: [linux, osx, official]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - if: matrix.src != 'official'
+        uses: actions/download-artifact@v4
+        with:
+          name: zig-win-from-${{ matrix.src }}
+          path: win
+      - name: fetch official zig
+        if: matrix.src == 'official'
+        run: |
+          curl -fsSL -o z.zip "https://ziglang.org/builds/zig-x86_64-windows-$ZV.zip"
+          7z x -y z.zip > /dev/null
+      - name: version, env, hello
+        run: |
+          if [ "${{ matrix.src }}" = official ]; then ZE="$PWD/zig-x86_64-windows-$ZV/zig.exe"; else ZE="$PWD/win/bin/zig.exe"; fi
+          "$ZE" version
+          "$ZE" env
+          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from %s zig.exe\\n", .{"${{ matrix.src }}"});\n}\n' > hello.zig
+          set +e
+          "$ZE" build-exe -target x86_64-windows -fno-llvm -fno-lld -femit-bin=hello_win.exe hello.zig
+          rcw=$?
+          echo "build-exe x86_64-windows (self-hosted) rc=$rcw"
+          [ -f hello_win.exe ] && ./hello_win.exe
+          "$ZE" build-exe -target x86_64-linux -fno-llvm -fno-lld -femit-bin=hello_lnx hello.zig
+          echo "build-exe x86_64-linux (self-hosted) rc=$?"
+          [ -f hello_lnx ] && file hello_lnx
+          exit $rcw
