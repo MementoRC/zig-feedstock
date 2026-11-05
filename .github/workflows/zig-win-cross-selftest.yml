@@ -244,12 +244,12 @@ jobs:
       - name: write libc file
         run: |
           X="$RUNNER_TEMP/xwin"
-          printf 'include_dir=%s/sdk/include/ucrt\nsys_include_dir=%s/crt/include\ncrt_dir=%s/sdk/lib/ucrt/x86_64\nmsvc_lib_dir=%s/crt/lib/x86_64\nkernel32_lib_dir=%s/sdk/lib/um/x86_64\ngcc_dir=\n' "$X" "$X" "$X" "$X" "$X" > "$RUNNER_TEMP/libc-msvc.txt"
+          printf 'include_dir=%s/sdk/include/ucrt\nsys_include_dir=%s/crt/include\ncrt_dir=%s/sdk/lib/ucrt/x86_64\nmsvc_lib_dir=%s/crt/lib/x86_64\nkernel32_lib_dir=%s/sdk/lib/um/x86_64\ngcc_dir=\ndarwin_sdk_dir=\n' "$X" "$X" "$X" "$X" "$X" > "$RUNNER_TEMP/libc-msvc.txt"
           cat "$RUNNER_TEMP/libc-msvc.txt"
       - name: build LLVM zig.exe for x86_64-windows-msvc
         run: |
           set +e
-          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc" ZIG_LIBC="$RUNNER_TEMP/libc-msvc.txt"
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
           cd src
           rc=0
           time zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe -Denable-llvm -Dstatic-llvm \
