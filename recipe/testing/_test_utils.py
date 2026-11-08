@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform as _platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -44,6 +45,38 @@ def SKIP(name: str, detail: str = "") -> None:
     _record("SKIP", name, detail)
 
 
+def print_summary() -> None:
+    """Print the shared one-line results tally."""
+    n_pass = len(_results["PASS"])
+    n_fail = len(_results["FAIL"])
+    n_warn = len(_results["WARN"])
+    n_skip = len(_results["SKIP"])
+    print(f"=== Results: {n_pass} passed, {n_fail} failed, "
+          f"{n_warn} warnings, {n_skip} skipped ===")
+
+
+def registered_check_count() -> int:
+    """Total recorded outcomes across PASS/FAIL/WARN/SKIP."""
+    return sum(len(v) for v in _results.values())
+
+
+def enforce_coverage_floor(floor: int, label: str, provenance: str = "") -> None:
+    """Redden the board if fewer checks ran than a known-good baseline.
+
+    Callers MUST call this BEFORE computing their n_pass/n_fail tally, or
+    the FAIL it records here is not counted.  The floor is an EXACT measured
+    count with no margin -- unlike the soft margin in recipe/building/_mingw.sh --
+    because the point is that losing ONE check must redden the board.
+    Raise the floor when checks are added.
+    """
+    count = registered_check_count()
+    if count < floor:
+        FAIL(
+            f"coverage-floor-{label}",
+            f"registered {count} checks, floor is {floor} ({provenance})",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Build-machine OS (needed by _run for Windows process-kill path)
 # ---------------------------------------------------------------------------
@@ -77,14 +110,318 @@ def setup_zig_global_cache_dir() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test-env prefix resolution
+# ---------------------------------------------------------------------------
+def resolve_test_prefix(marker: str = "bin") -> Path:
+    """Resolve the prefix that actually holds the package under test.
+
+    rattler-build spins up a separate BUILD env whenever a test block
+    declares `requirements: build:`. CONDA_PREFIX then resolves to that
+    test BUILD env, while the package under test is installed in the RUN
+    env (PREFIX). Prefer PREFIX, fall back to CONDA_PREFIX, and pick
+    whichever candidate actually has `<candidate>/<marker>` on disk so a
+    lane without build requirements (where only CONDA_PREFIX is set/valid)
+    keeps working unchanged.
+
+    `marker` must be the subpath the CALLER actually consumes, not just
+    any path that happens to exist under the desired prefix. It is used
+    purely to discriminate which env is correct and is NEVER appended to
+    the returned value -- callers keep computing their own subpaths from
+    the returned prefix. Passing a marker the caller does not consume can
+    select an env that satisfies the marker but not the real lookup,
+    reproducing the silent skip this helper exists to prevent.
+    """
+    for var in ("PREFIX", "CONDA_PREFIX"):
+        candidate = os.environ.get(var, "")
+        if candidate and (Path(candidate) / marker).is_dir():
+            print(f"  prefix source = {var} (marker {marker!r})")
+            return Path(candidate)
+    print(f"  prefix source = CONDA_PREFIX (fallback, no env had {marker!r})")
+    return Path(os.environ.get("CONDA_PREFIX", ""))
+
+
+# ---------------------------------------------------------------------------
 # Emulation detection
 # ---------------------------------------------------------------------------
+# True when the package under test cannot run natively on this runner.
+# Keyed on recipe.yaml's QEMU_EXECVE export (set only when a real
+# qemu-execve-<arch> binary was resolved), NOT on host arch or CI.
 _native_machine = _platform.machine()
-_is_emulated = (
-    sys.platform == "linux"
-    and _native_machine not in ("x86_64", "i686")
-    and os.environ.get("CI", "") != ""
-)
+_is_emulated = sys.platform == "linux" and bool(os.environ.get("QEMU_EXECVE", ""))
+# Cold compiles under qemu have been measured at ~937s.
+EMULATED_TIMEOUT_S = 1800
+
+
+def _canonical_arch(arch: str) -> str:
+    """Normalise arch aliases (amd64/arm64/ppc64le) to their triplet spelling.
+
+    Case-insensitive: platform.machine() reports "AMD64"/"ARM64" on Windows.
+    """
+    aliases = {
+        "amd64": "x86_64",
+        "arm64": "aarch64",
+        "ppc64le": "powerpc64le",
+    }
+    arch = arch.lower()
+    return aliases.get(arch, arch)
+
+
+def target_arch_from_triplet(triplet: str) -> str:
+    """Extract the machine arch from a conda triplet.
+
+    e.g. 'powerpc64le-conda-linux-gnu' -> 'powerpc64le'.
+    """
+    return triplet.split("-", 1)[0] if triplet else ""
+
+
+def is_foreign_target(triplet: str) -> bool:
+    """True when triplet's arch differs from the native machine (alias-aware).
+
+    Restricted to Linux triplets: the QEMU-user + binfmt_misc + QEMU_LD_PREFIX
+    mechanism this feeds is Linux-ELF-specific (mirrors recipe.yaml's `if:
+    linux` gating of QEMU_EXECVE/QEMU_LD_PREFIX). Windows/macOS cross targets
+    are never run under it, so they must never be reported as "foreign" here.
+    """
+    if "linux" not in triplet:
+        return False
+    arch = target_arch_from_triplet(triplet)
+    if not arch:
+        return False
+    return _canonical_arch(arch) != _canonical_arch(_native_machine)
+
+
+def _qemu_binary_arch(arch: str) -> str:
+    """Map a canonical triplet arch to the qemu-execve-<arch> package's naming.
+
+    Mirrors recipe.yaml's qemu_arch computed value: powerpc64le -> ppc64le,
+    every other targeted arch passes through unchanged.
+    """
+    canonical = _canonical_arch(arch)
+    return "ppc64le" if canonical == "powerpc64le" else canonical
+
+
+# ELF e_machine -> triplet arch spelling. EM_PPC64 (21) covers both
+# endiannesses; this feedstock only ships little-endian ppc64.
+_ELF_MACHINES = {
+    62: "x86_64",
+    183: "aarch64",
+    21: "powerpc64le",
+    243: "riscv64",
+    22: "s390x",
+}
+
+
+def elf_arch(path: Path) -> str | None:
+    """Arch of an ELF file, read from its header; None if not ELF."""
+    try:
+        with open(path, "rb") as fh:
+            hdr = fh.read(20)
+    except OSError:
+        return None
+    if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
+        return None
+    order = "little" if hdr[5] == 1 else "big"
+    machine = int.from_bytes(hdr[18:20], order)
+    return _ELF_MACHINES.get(machine, f"e_machine={machine}")
+
+
+def check_qemu_execve_consistency(triplet: str) -> bool:
+    """Cross-check QEMU_EXECVE against the arch of the zig binary under test.
+
+    recipe.yaml adds qemu_pkg exactly when build_platform != target_platform,
+    i.e. when the package's own binaries are foreign to the runner. The
+    triplet cannot stand in for that: it names the code-generation target
+    (xtarget_), which differs from the package's host arch on every hosted
+    cross lane. The binary's ELF header is the non-circular signal, and
+    python runs from the test BUILD env, so platform.machine() is the
+    runner's arch.
+
+    Linux only. Returns False after recording a FAIL on disagreement.
+    """
+    if sys.platform != "linux":
+        return True
+    name = "QEMU_EXECVE consistency"
+    prefix = resolve_test_prefix("bin")
+    arch = None
+    # <triplet>-zig is a shell script on wrapper-only outputs; the -zig-cc
+    # C shim is the ELF there.
+    for tool in (f"{triplet}-zig", f"{triplet}-zig-cc", "zig"):
+        candidate = prefix / "bin" / tool
+        if candidate.exists():
+            arch = elf_arch(candidate.resolve())
+            if arch:
+                break
+    if arch is None:
+        WARN(name, f"no ELF zig binary under {prefix}/bin "
+                   f"({triplet}-zig, {triplet}-zig-cc, zig) -- check not run")
+        return True
+
+    native = _canonical_arch(_native_machine)
+    foreign = _canonical_arch(arch) != native
+    qemu_execve = os.environ.get("QEMU_EXECVE", "")
+    if not qemu_execve:
+        if foreign:
+            FAIL(name, f"zig binary is {arch} on a {native} runner but QEMU_EXECVE is unset "
+                       "-- is qemu_pkg missing from this test's build requirements?")
+            return False
+        PASS(name, f"native {arch}, QEMU_EXECVE unset")
+        return True
+    if not foreign:
+        FAIL(name, f"QEMU_EXECVE={qemu_execve} but the zig binary is native {arch}")
+        return False
+    expected = f"qemu-execve-{_qemu_binary_arch(arch)}"
+    if os.path.basename(qemu_execve) != expected:
+        FAIL(name, f"QEMU_EXECVE={qemu_execve}, expected {expected} for a {arch} binary")
+        return False
+    if not os.access(qemu_execve, os.X_OK):
+        FAIL(name, f"QEMU_EXECVE={qemu_execve} is not executable")
+        return False
+    PASS(name, f"{arch} binary on {native} runner via {expected}")
+    return True
+
+
+_MACHO_CPUS = {0x01000007: "x86_64", 0x0100000C: "aarch64"}
+_DARWIN_PLATFORM_ARCH = {"osx-64": "x86_64", "osx-arm64": "aarch64"}
+
+
+def macho_arches(path: Path) -> list[str] | None:
+    """Arches of a Mach-O (thin or fat) file from its header; None if not Mach-O."""
+    try:
+        with open(path, "rb") as fh:
+            hdr = fh.read(8)
+            if len(hdr) < 8:
+                return None
+            if hdr[:4] == b"\xca\xfe\xba\xbe":
+                n = int.from_bytes(hdr[4:8], "big")
+                if n > 16:  # Java class files share this magic
+                    return None
+                ents = fh.read(20 * n)
+                cpus = [int.from_bytes(ents[i * 20:i * 20 + 4], "big") for i in range(n)]
+            elif hdr[:4] == b"\xcf\xfa\xed\xfe":
+                cpus = [int.from_bytes(hdr[4:8], "little")]
+            elif hdr[:4] == b"\xfe\xed\xfa\xcf":
+                cpus = [int.from_bytes(hdr[4:8], "big")]
+            else:
+                return None
+    except OSError:
+        return None
+    return [_MACHO_CPUS.get(c, f"cputype={c:#x}") for c in cpus]
+
+
+def check_shim_host_arch_darwin(triplet: str) -> bool:
+    """macOS: the shipped <triplet>-zig-cc shim must match the package host arch.
+
+    Package host arch comes from ZIG_TEST_TARGET_PLATFORM (recipe target_platform),
+    falling back to the Mach-O arch of `zig`. Not platform.machine() (Rosetta)
+    and not the triplet (xtarget codegen arch).
+
+    Returns False after recording a FAIL on mismatch; no-op off Darwin.
+    """
+    if sys.platform != "darwin":
+        return True
+    name = "shim host arch"
+    prefix = resolve_test_prefix("bin")
+    shim = prefix / "bin" / f"{triplet}-zig-cc"
+    if not shim.exists():
+        SKIP(name, f"{shim} not found")
+        return True
+    shim = shim.resolve()
+    arches = macho_arches(shim)
+    if arches is None:
+        SKIP(name, f"{shim} is not a Mach-O (shell script?)")
+        return True
+    host = _DARWIN_PLATFORM_ARCH.get(os.environ.get("ZIG_TEST_TARGET_PLATFORM", ""))
+    if host is None:
+        zig_arches = macho_arches((prefix / "bin" / "zig").resolve())
+        host = zig_arches[0] if zig_arches and len(zig_arches) == 1 else None
+    if host is None:
+        FAIL(name, "cannot determine package host arch (ZIG_TEST_TARGET_PLATFORM "
+                   f"unset/unknown, {prefix}/bin/zig not thin Mach-O)")
+        return False
+    if host not in arches:
+        FAIL(name, f"shim {shim} is {'+'.join(arches)} but package host is {host}")
+        return False
+    PASS(name, f"shim is {'+'.join(arches)}, package host {host}")
+    return True
+
+
+def emulation_prefix(triplet: str) -> list[str]:
+    """Return the argv prefix needed to run a target-arch binary, or [] if native.
+
+    Uses ONLY qemu-execve-<arch> -- the vanilla qemu-<arch> binary is
+    deliberately NOT used here. Both binaries ship in the same
+    qemu-execve-<arch> package and a silent fallback to the vanilla one
+    would make it ambiguous which emulator actually ran; do not re-add it.
+    Returns [] (degrade to binfmt_misc) when no qemu-execve binary can be
+    resolved, so callers don't hard-fail on a missing lookup.
+
+    Gate and emulator are both keyed on the TRIPLET. $QEMU_EXECVE is
+    target_platform-keyed and there is one per lane, so it is honoured only
+    when its basename matches the arch this triplet asks for; otherwise we
+    fall through to the PATH lookup. Without that check, a lane handling two
+    foreign targets would gate on one arch and emulate with another.
+    """
+    if not is_foreign_target(triplet):
+        return []
+    arch = _qemu_binary_arch(target_arch_from_triplet(triplet))
+    qemu_execve = os.environ.get("QEMU_EXECVE", "")
+    if (
+        qemu_execve
+        and os.path.basename(qemu_execve) == f"qemu-execve-{arch}"
+        and os.access(qemu_execve, os.X_OK)
+    ):
+        return [qemu_execve]
+    found = shutil.which(f"qemu-execve-{arch}")
+    return [found] if found else []
+
+
+def check_emulation_env(triplet: str) -> bool:
+    """Preflight QEMU emulation setup for a foreign-target test script.
+
+    Call once per script after the triplet is known, before the first
+    target-arch invocation. Returns True if safe to proceed (including the
+    native case). Returns False after
+    reporting FAIL if a hard blocker was found. Always runs the QEMU_EXECVE
+    consistency check first, which records one PASS/FAIL/WARN line.
+    """
+    if not check_qemu_execve_consistency(triplet):
+        return False
+    if not is_foreign_target(triplet):
+        return True
+
+    arch = _qemu_binary_arch(target_arch_from_triplet(triplet))
+    if not emulation_prefix(triplet):
+        WARN(
+            "qemu emulation binary",
+            f"qemu-execve-{arch} not found (QEMU_EXECVE unset/not executable, "
+            "not on PATH) -- relying on binfmt_misc for target invocations",
+        )
+
+    ld_prefix = os.environ.get("QEMU_LD_PREFIX", "")
+    if not ld_prefix:
+        FAIL(
+            "QEMU_LD_PREFIX is set",
+            "unset -- the target binary's loader will resolve against the host root",
+        )
+        return False
+
+    ld_path = Path(ld_prefix)
+    if not ld_path.is_dir():
+        detail = f"{ld_prefix} does not exist"
+        try:
+            parent = ld_path.parent
+            if parent.is_dir():
+                listing = ", ".join(sorted(p.name for p in parent.iterdir()))
+                detail += f"; {parent} contains: {listing}"
+        except Exception:
+            pass
+        FAIL("QEMU_LD_PREFIX directory exists", detail)
+        return False
+
+    if not list(ld_path.glob("lib*/ld*.so*")):
+        WARN("QEMU_LD_PREFIX loader glob", f"no lib*/ld*.so* found under {ld_prefix}")
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -95,14 +432,28 @@ def _run(
     *,
     timeout: int = 30,
     cwd: str | Path | None = None,
+    target: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command, return CompletedProcess. Never raises on non-zero rc."""
+    """Run a command, return CompletedProcess. Never raises on non-zero rc.
+
+    If `target` is a conda triplet, the command is prefixed with
+    `emulation_prefix(target)` (a qemu-execve-<arch> wrapper) when the
+    triplet's arch is foreign to the native machine. Default None preserves
+    prior behaviour exactly.
+    """
+    if target is not None:
+        cmd = emulation_prefix(target) + cmd
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
+            # POSIX: give the child its own process group so the killpg on the
+            # timeout path reaches only the child tree. Without it the child
+            # inherits OUR pgid and killpg() SIGKILLs this harness too.
+            # No-op on Windows, where False is the default regardless.
+            start_new_session=not _build_is_win,
         )
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="NOTFOUND")
@@ -138,3 +489,80 @@ def _run(
                     except OSError:
                         pass
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="TIMEOUT")
+
+
+def timed_out(proc: subprocess.CompletedProcess[str]) -> bool:
+    """True when `proc` is _run's timeout sentinel."""
+    return proc.stderr == "TIMEOUT"
+
+
+# ---------------------------------------------------------------------------
+# Target executability probe (measured, not inferred)
+# ---------------------------------------------------------------------------
+_can_execute_cache: dict[tuple[str, str | None], bool] = {}
+
+
+def _probe_diag(triplet: str, stage: str, proc: subprocess.CompletedProcess[str],
+                note: str = "") -> None:
+    """Explain a can_execute_target failure.
+
+    A silent False is indistinguishable from a broken probe, which is exactly
+    the ambiguity that made the ppc64le skips unreadable.
+    """
+    why = "TIMEOUT" if timed_out(proc) else f"rc={proc.returncode}"
+    line = f"  can_execute_target({triplet}): {stage} failed ({why})"
+    if note:
+        line += f" -- {note}"
+    print(line)
+    for label in ("stdout", "stderr"):
+        text = (getattr(proc, label, "") or "").strip()
+        if text:
+            for out in text.splitlines()[-15:]:
+                print(f"    {stage} {label}: {out}")
+
+
+def can_execute_target(triplet: str, zig_cc: str | None = None) -> bool:
+    """Measure -- don't infer -- whether a `triplet` binary can run here.
+
+    Compiles a trivial program with `zig_cc` and executes it through `_run`'s
+    `target=` routing (qemu-execve when foreign). Cached per (triplet, zig_cc).
+    """
+    key = (triplet, zig_cc)
+    if key in _can_execute_cache:
+        return _can_execute_cache[key]
+    if not zig_cc:
+        _can_execute_cache[key] = False
+        return False
+    result = False
+    timeout = EMULATED_TIMEOUT_S if _is_emulated else 120
+
+    def _timeout_fail(proc: subprocess.CompletedProcess[str]) -> None:
+        if _is_emulated and timed_out(proc):
+            FAIL("target probe", f"TIMEOUT under emulation after {timeout}s")
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "probe.c"
+            exe = Path(td) / "probe"
+            src.write_text("int main(void) { return 0; }\n")
+            # target= on the compile too: on an unhosted lane zig_cc is itself a
+            # target-arch binary and needs the emulator.
+            r_compile = _run([zig_cc, "-o", str(exe), str(src)], cwd=td,
+                             target=triplet, timeout=timeout)
+            produced = exe if exe.exists() else exe.with_suffix(".exe")
+            if r_compile.returncode != 0 or not produced.exists():
+                _probe_diag(triplet, "compile", r_compile,
+                            "" if produced.exists() else "no output binary produced")
+                _timeout_fail(r_compile)
+            else:
+                r_exec = _run([str(produced)], target=triplet, timeout=timeout)
+                result = r_exec.returncode == 0
+                if not result:
+                    _probe_diag(triplet, "exec", r_exec)
+                    _timeout_fail(r_exec)
+    except Exception as exc:
+        print(f"  can_execute_target({triplet}): probe raised "
+              f"{type(exc).__name__}: {exc}")
+        result = False
+    _can_execute_cache[key] = result
+    return result

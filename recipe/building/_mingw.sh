@@ -6,19 +6,35 @@
 source "${RECIPE_DIR}/building/_common.sh"
 
 function generate_mingw_import_libs() {
-  # Workaround for ziglang/zig#14919: add synchronization.def so zig can generate
-  # libsynchronization.a when cross-compiling to Windows (consumers using -lsynchronization).
-  # IMPORTANT: LIBRARY must be api-ms-win-core-synch-l1-2-0.dll, NOT synchronization.dll.
-  # "synchronization.dll" is neither a real DLL on disk nor a valid API Set Schema name -- it doesn't
-  # exist as a physical file in Windows or MSYS2. The real MinGW-w64 alias points to
-  # libapi-ms-win-core-synch-l1-2-0.a, whose LIBRARY directive is api-ms-win-core-synch-l1-2-0.dll.
-  # Windows API Set Schema resolves api-ms-win-* names to the actual host DLL at runtime.
+  # Workaround for ziglang/zig#14919: synchronization.def is absent upstream.
+  # Rationale: reference doc S4.
   if is_not_unix; then
     _zig_lib="${PREFIX}/Library/lib/zig"
   else
+    : # brush 0.4.0 $? guard
     _zig_lib="${PREFIX}/lib/zig"
   fi
   _mingw_common="${_zig_lib}/libc/mingw/lib-common"
+
+  # Assert every upstream mingw path this layer depends on actually exists
+  # under ${_zig_lib} before any generation work below. A single upstream
+  # layout change should fail loudly here, not degrade silently through the
+  # scattered `if [[ -d ... ]]` skips further down.
+  _mingw_missing=""
+  for _req in \
+      "libc/mingw/crt" \
+      "libc/mingw/lib-common" \
+      "libc/mingw/libsrc" \
+      "libc/mingw/def-include"; do
+    [[ -d "${_zig_lib}/${_req}" ]] || _mingw_missing="${_mingw_missing} ${_zig_lib}/${_req}"
+  done
+  [[ -f "${_zig_lib}/libc/include/any-windows-any/setjmp.h" ]] || \
+    _mingw_missing="${_mingw_missing} ${_zig_lib}/libc/include/any-windows-any/setjmp.h"
+  if [[ -n "${_mingw_missing}" ]]; then
+    echo "ERROR: [_mingw] upstream contract broken:${_mingw_missing}" >&2
+    return 1
+  fi
+
   if [[ -d "${_mingw_common}" ]]; then
     cat > "${_mingw_common}/synchronization.def" << 'SYNCHRONIZATION_DEF'
 LIBRARY api-ms-win-core-synch-l1-2-0.dll
@@ -59,28 +75,98 @@ SYNCHRONIZATION_DEF
   # uuid is special: compiled from libsrc/uuid.c (no DLL import lib needed).
   # Only generates files that are missing; safe to re-run.
   #
-  # Target arch detection for dlltool machine type and zig cc -target.
-  # ZIG_TRIPLET is e.g. "x86_64-windows-gnu" or "aarch64-windows-gnu".
+  # Lane's own target arch drives dlltool_machine only; import libs are
+  # generated for ALL THREE Windows arches via the loop below.
+  # NOTE: ZIG_TRIPLET is this lane's TARGET triple, never a Windows triple --
+  # e.g. "x86_64-linux-gnu", "aarch64-linux-gnu", "powerpc64le-linux-gnu",
+  # "x86_64-macos". Only its ARCH prefix is consumed.
   _win_arch="${ZIG_TRIPLET%%-*}"
   case "${_win_arch}" in
-    x86_64)         _dlltool_machine="i386:x86-64"; _win_target="x86_64-windows-gnu" ;;
-    aarch64)        _dlltool_machine="arm64";        _win_target="aarch64-windows-gnu" ;;
-    x86|i386|i686)  _dlltool_machine="i386";         _win_target="x86-windows-gnu" ;;
-    *)              _dlltool_machine="i386:x86-64"; _win_target="x86_64-windows-gnu"
-                    echo "WARN: unknown Windows arch '${_win_arch}', defaulting to x86_64" ;;
+    x86_64)         _dlltool_machine="i386:x86-64" ;;
+    aarch64)        _dlltool_machine="arm64" ;;
+    x86|i386|i686)  _dlltool_machine="i386" ;;
+    *)              _dlltool_machine="i386:x86-64"
+                    echo "INFO: non-Windows lane arch '${_win_arch}': dlltool machine defaults to i386:x86-64" ;;
   esac
   if [[ -d "${_mingw_common}" ]]; then
-    # Use the BUILD machine's zig binary (CONDA_ZIG_BUILD) so this works even
-    # for cross-compilation targets (e.g. win-arm64 built on win-64) where the
-    # installed zig binary is for the wrong architecture and can't execute.
-    # BUILD_ZIG is the binary name (not a full path), so resolve via PATH first,
-    # then fall back to explicit BUILD_PREFIX locations.
+    # Prefer the freshly built zig: it carries this recipe's mingw patches.
+    # Falls back to the BUILD-machine bootstrap only if it cannot execute here.
+    if is_not_unix; then
+      _fresh_zig_bin="${PREFIX}/Library/bin/${CONDA_TRIPLET}-zig"
+    else
+      : # brush 0.4.0 $? guard
+      _fresh_zig_bin="${PREFIX}/bin/${CONDA_TRIPLET}-zig"
+    fi
     _zig_bin="$(command -v "${BUILD_ZIG}" 2>/dev/null || true)"
     if [[ -z "${_zig_bin}" ]]; then
       if is_not_unix; then
         _zig_bin="${BUILD_PREFIX}/Library/bin/${BUILD_ZIG}"
       else
+        : # brush 0.4.0 $? guard
         _zig_bin="${BUILD_PREFIX}/bin/${BUILD_ZIG}"
+      fi
+    fi
+    _boot_zig_bin="${_zig_bin}"
+    if is_not_unix; then
+      _boot_mingw="${BUILD_PREFIX}/Library/lib/zig/libc/mingw"
+    else
+      : # brush 0.4.0 $? guard
+      _boot_mingw="${BUILD_PREFIX}/lib/zig/libc/mingw"
+    fi
+    _fresh_mingw="${_zig_lib}/libc/mingw"
+
+    # Sets _mingw_cmp (match|drift|unknown), _mingw_drift, _mingw_drift_n.
+    _mingw_compare_trees() {
+      _mingw_drift=""
+      _mingw_drift_n=0
+      if ! command -v diff >/dev/null 2>&1 || [[ ! -d "${_boot_mingw}" || ! -d "${_fresh_mingw}" ]]; then
+        _mingw_cmp="unknown"
+        return 0
+      fi
+      # Bootstrap-only files are its own generated import libs/objects/.def; ignore them.
+      _mingw_drift="$(diff -rq -x '*.a' -x '*.o' -x '*.obj' -x '*.lib' "${_boot_mingw}" "${_fresh_mingw}" 2>&1 | grep -v "^Only in ${_boot_mingw}" || true)"
+      if [[ -n "${_mingw_drift}" ]]; then
+        _mingw_drift_n="$(printf '%s\n' "${_mingw_drift}" | wc -l)"
+        _mingw_cmp="drift"
+      else
+        _mingw_cmp="match"
+      fi
+      return 0
+    }
+
+    _mingw_use_fresh=0
+    if [[ -x "${_fresh_zig_bin}" ]] && "${_fresh_zig_bin}" version >/dev/null 2>&1; then
+      _mingw_use_fresh=1
+    fi
+    _mingw_cmp=""
+    # Linux cross lanes run the fresh zig under QEMU (binfmt_misc): ~1h45m vs
+    # ~6 min for the native bootstrap. Prefer bootstrap iff its mingw tree matches.
+    if [[ "${_mingw_use_fresh}" -eq 1 ]] && is_cross && is_linux; then
+      _mingw_compare_trees
+      if [[ "${_mingw_cmp}" == "match" ]]; then
+        _mingw_use_fresh=0
+        echo "INFO: [_mingw] emulated lane: using native bootstrap zig (mingw tree matches)"
+      else
+        echo "WARN: [_mingw] emulated lane: bootstrap mingw tree ${_mingw_cmp} (${_mingw_drift_n} file(s)); using fresh zig under emulation (slow, NOT a hang)"
+      fi
+    fi
+
+    if [[ "${_mingw_use_fresh}" -eq 1 ]]; then
+      _zig_bin="${_fresh_zig_bin}"
+      echo "INFO: using freshly built zig for mingw CRT: ${_zig_bin}"
+    else
+      _zig_bin="${_boot_zig_bin}"
+      echo "INFO: using bootstrap zig for mingw CRT: ${_zig_bin}"
+      if [[ -z "${_mingw_cmp}" ]]; then
+        _mingw_compare_trees
+      fi
+      if [[ "${_mingw_cmp}" == "unknown" ]]; then
+        echo "INFO: [_mingw] cannot compare bootstrap mingw sources with this build's (diff or tree missing)"
+      elif [[ "${_mingw_cmp}" == "match" ]]; then
+        echo "INFO: [_mingw] bootstrap mingw sources match this build's tree"
+      else
+        echo "WARN: [_mingw] bootstrap mingw sources differ from this build's in ${_mingw_drift_n} file(s); the staged CRT reflects the bootstrap's tree"
+        printf '%s\n' "${_mingw_drift}" | sed -n '1,10s/^/  /p'
       fi
     fi
     _def_include="${_mingw_common}/../def-include"
@@ -99,133 +185,384 @@ SYNCHRONIZATION_DEF
       fi
     done
 
-    dbg echo "=== MinGW import lib generation: zig=${_zig_bin} dlltool=${_dlltool:-not found} ==="
+    # zig 0.17's built-in `ar` will not CREATE a new archive on Darwin, so prefer
+    # llvm-ar and keep `zig ar` only as a fallback.
+    _ar_cmd=()
+    for _cand in \
+        "${BUILD_PREFIX}/bin/llvm-ar" \
+        "${BUILD_PREFIX}/bin/llvm-ar.exe" \
+        "${BUILD_PREFIX}/Library/bin/llvm-ar.exe" \
+        "${BUILD_PREFIX}/Library/bin/llvm-ar" \
+        "$(command -v llvm-ar 2>/dev/null || true)"; do
+      if [[ -x "${_cand}" ]]; then
+        _ar_cmd=("${_cand}")
+        break
+      fi
+    done
+    [[ ${#_ar_cmd[@]} -eq 0 ]] && _ar_cmd=("${_zig_bin}" ar)
+
+    dbg echo "=== MinGW import lib generation: zig=${_zig_bin} dlltool=${_dlltool:-not found} ar=${_ar_cmd[*]} ==="
     if [[ -n "${_dlltool}" ]] && [[ -x "${_zig_bin}" ]]; then
       dbg echo "=== Generating MinGW import libs (dlltool=${_dlltool}) ==="
       _gen_count=0
+      _gen_fail=0
+      _gen_failed=""
+      _gen_skip=0
+      _gen_skipped=""
 
-      # Helper: generate .a from a processed .def file
-      function _gen_implib() {
-        local stem="$1" def="$2"
-        local lib="${_mingw_common}/lib${stem}.a"
-        [[ -f "${lib}" ]] && return 0
-        local dll
-        dll="$(awk '/^LIBRARY/{gsub(/"/, "", $2); print $2; exit}' "${def}")"
-        [[ -z "${dll}" ]] && dll="${stem}.dll"
-        "${_dlltool}" -m "${_dlltool_machine}" -D "${dll}" -d "${def}" -l "${lib}" 2>/dev/null || true
-        _gen_count=$(( _gen_count + 1 ))
+      # Count a failed cc -E preprocess ($2 = output .def; stderr is in $2.pp.err).
+      function _note_pp_skip() {
+        _gen_skip=$(( _gen_skip + 1 ))
+        _gen_skipped="${_gen_skipped} $1"
+        echo "WARNING: [_mingw] preprocess failed for $1" >&2
+        head -n 20 "$2.pp.err" >&2
+        rm -f "$2.pp.err" "$2"
       }
 
-      # Step 1: plain .def files (shlwapi.def, version.def, synchronization.def, etc.)
-      for _def in "${_mingw_common}"/*.def; do
-        [[ -f "${_def}" ]] || continue
-        _stem="$(basename "${_def%.def}")"
-        _gen_implib "${_stem}" "${_def}"
-      done
+      # Macro-fragment include-helper stems (not standalone DLL defs). See reference doc S5.6/S3.11.
+      function _is_helper_stem() {
+        case "$1" in
+          func|crt-aliases|ucrtbase-common|vcruntime140-common) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
 
-      # Step 2: .def.in template files (ws2_32, kernel32, ole32, advapi32, user32, ...)
-      # Process through zig's C preprocessor with x86_64 defines so architecture
-      # macros (F_X64, F_I386, F64, F32, etc.) expand correctly.
-      for _def_in in "${_mingw_common}"/*.def.in; do
-        [[ -f "${_def_in}" ]] || continue
-        _stem="$(basename "${_def_in%.def.in}")"
-        _lib="${_mingw_common}/lib${_stem}.a"
-        [[ -f "${_lib}" ]] && continue
-        _def="${_mingw_common}/${_stem}.def"
-        if [[ ! -f "${_def}" ]]; then
-          "${_zig_bin}" cc -E -P \
-            -target "${_win_target}" \
-            -x assembler-with-cpp \
-            -I"${_def_include}" \
-            "${_def_in}" 2>/dev/null > "${_def}" || { rm -f "${_def}"; continue; }
-        fi
-        _gen_implib "${_stem}" "${_def}"
-      done
-
-      # Step 3: uuid -- compiled from C source (no DLL, no import lib needed).
-      # zig compiles libsrc/uuid.c into a static archive.
-      _uuid_lib="${_mingw_common}/libuuid.a"
-      _uuid_src="${_mingw_libsrc}/uuid.c"
-      if [[ ! -f "${_uuid_lib}" ]] && [[ -f "${_uuid_src}" ]]; then
-        _uuid_obj="${_mingw_common}/_uuid.o"
-        "${_zig_bin}" cc -target "${_win_target}" -c "${_uuid_src}" \
-            -o "${_uuid_obj}" 2>/dev/null && \
-          "${_zig_bin}" ar rcs "${_uuid_lib}" "${_uuid_obj}" 2>/dev/null || true
-        rm -f "${_uuid_obj}"
-        _gen_count=$(( _gen_count + 1 ))
-      fi
-
-      dbg echo "=== Generated ${_gen_count} import libs in ${_mingw_common} ==="
-
-      # Step 4: Supplemental import libs from mingw-w64 .def.in templates.
-      # Zig doesn't ship msvcrt.def -- we provide a complete mingw-w64 version
-      # that covers all exports (stdio, math, POSIX I/O, etc.).
-      # msvcrt.def.in uses #include "func.def.in" and #include "crt-aliases.def.in",
-      # both of which live in zig's own def-include/.  We also include zig's
-      # lib-common/ so any future templates can resolve ucrtbase-common.def.in etc.
-      # _supp_defs remains first so pthread.def and msvcrt.def.in are still found.
-      _supp_defs="${RECIPE_DIR}/building/mingw-defs"
-      if [[ -d "${_supp_defs}" ]]; then
-        dbg echo "=== Processing supplemental mingw-w64 .def.in templates ==="
-        for _supp_in in "${_supp_defs}"/*.def.in; do
-          [[ -f "${_supp_in}" ]] || continue
-          _supp_stem="$(basename "${_supp_in%.def.in}")"
-          # Skip pure include helpers (not standalone DLL definitions)
-          case "${_supp_stem}" in
-            func|ucrtbase-common|crt-aliases) continue ;;
-          esac
-          _supp_lib="${_mingw_common}/lib${_supp_stem}.a"
-          [[ -f "${_supp_lib}" ]] && continue
-          _supp_def="${_mingw_common}/${_supp_stem}.def"
-          if [[ ! -f "${_supp_def}" ]]; then
-            "${_zig_bin}" cc -E -P \
-              -target "${_win_target}" \
-              -x assembler-with-cpp \
-              -I"${_supp_defs}" \
-              -I"${_def_include}" \
-              -I"${_mingw_common}" \
-              "${_supp_in}" 2>/dev/null > "${_supp_def}" || { rm -f "${_supp_def}"; continue; }
+      # Helper: generate .a from a processed .def file into a given output dir.
+      # ${_dlltool_machine} is set per-arch by the loop below.
+      # Only counts as generated when dlltool exits 0 AND produced a non-empty
+      # archive; otherwise the attempt is recorded as a failure and no
+      # zero-byte artifact is left behind.
+      function _gen_implib() {
+        local stem="$1" def="$2" outdir="$3"
+        local lib="${outdir}/lib${stem}.a"
+        [[ -f "${lib}" ]] && return 0
+        local dll="" _il_line
+        while IFS= read -r _il_line || [[ -n "${_il_line}" ]]; do
+          if [[ "${_il_line}" == LIBRARY* ]]; then
+            local -a _il_fields
+            read -r -a _il_fields <<< "${_il_line}"
+            if [[ ${#_il_fields[@]} -ge 2 ]]; then
+              dll="${_il_fields[1]//\"/}"
+            fi
+            break
           fi
-          _gen_implib "${_supp_stem}" "${_supp_def}"
-        done
-        # Also process plain .def files (no preprocessing needed)
-        for _supp_def in "${_supp_defs}"/*.def; do
-          [[ -f "${_supp_def}" ]] || continue
-          _supp_stem="$(basename "${_supp_def%.def}")"
-          _supp_lib="${_mingw_common}/lib${_supp_stem}.a"
-          [[ -f "${_supp_lib}" ]] && continue
-          _gen_implib "${_supp_stem}" "${_supp_def}"
-        done
-        dbg echo "=== Supplemental import libs done (total ${_gen_count}) ==="
+        done < "${def}"
+        [[ -z "${dll}" ]] && dll="${stem}.dll"
+        if "${_dlltool}" -m "${_dlltool_machine}" -D "${dll}" -d "${def}" -l "${lib}" 2>/dev/null && [[ -s "${lib}" ]]; then
+          _gen_count=$(( _gen_count + 1 ))
+        else
+          : # brush 0.4.0 $? guard
+          _gen_fail=$(( _gen_fail + 1 ))
+          _gen_failed="${_gen_failed} ${_dlltool_machine}:${stem}"
+          rm -f "${lib}"
+        fi
+      }
+
+      # Silence xtrace across the import-lib loops below. Each .def costs ~14
+      # trace lines and there are ~800 .def/.def.in files x3 arches, so this
+      # region alone would emit tens of thousands of CI log lines with no
+      # diagnostic value: dlltool failures are already swallowed by
+      # `2>/dev/null || true` and the post-loop summaries report the counts.
+      # Restored immediately after the loops so the CRT compile and stub
+      # archives -- where the real failures have occurred -- stay fully traced.
+      _mingw_xt=0
+      if [[ "${DEBUG_ZIG_BUILD:-0}" != "1" ]]; then
+        case $- in *x*) _mingw_xt=1 ;; esac
+        { set +x; } 2>/dev/null
       fi
 
-      # Step 5: arch-specific stubs and CRT output directory routing.
-      # aarch64 emits CRT objects into libarm64/ (arch-specific dir, prevents
-      # cross-arch contamination); i386 into lib32/; x86_64 keeps lib-common/.
-      if [[ "${_win_arch}" == "aarch64" ]]; then
-        _mingw_libarm64="${_mingw_common}/../libarm64"
-        mkdir -p "${_mingw_libarm64}"
-        _crt_outdir="${_mingw_libarm64}"
-      elif [[ "${_win_arch}" == "x86" || "${_win_arch}" == "i386" || "${_win_arch}" == "i686" ]]; then
-        _mingw_lib32="${_mingw_common}/../lib32"
-        mkdir -p "${_mingw_lib32}"
-        _crt_outdir="${_mingw_lib32}"
-      else
-        _crt_outdir="${_mingw_common}"
+      _mingw_libarm64="${_mingw_common}/../libarm64"
+      _mingw_lib32="${_mingw_common}/../lib32"
+
+      # Snapshot the original .def file list ONCE, before the per-arch loop:
+      # Steps 2/4 below write generated .def files into ${_ia_outdir}, which
+      # for the x86_64 pass IS ${_mingw_common}, so a re-glob per pass would
+      # let the x86_64 pass poison the aarch64/x86 passes' input.
+      _orig_defs=()
+      for _def in "${_mingw_common}"/*.def; do
+        [[ -f "${_def}" ]] && _orig_defs+=("${_def}")
+      done
+
+      # Generate import libs for ALL THREE Windows arches (not just this
+      # lane's own arch): the cache-warm loop further down links all three
+      # on every lane, so each needs its own arch-correct .def expansion,
+      # written to its own dir so arches never reuse each other's .def.
+      for _ia_entry in \
+          "x86_64|i386:x86-64|x86_64-windows-gnu|${_mingw_common}" \
+          "aarch64|arm64|aarch64-windows-gnu|${_mingw_libarm64}" \
+          "x86|i386|x86-windows-gnu|${_mingw_lib32}"; do
+        IFS='|' read -r _ia_arch _dlltool_machine _ia_target _ia_outdir <<< "${_ia_entry}"
+        mkdir -p "${_ia_outdir}"
+
+        # Step 1: plain .def files, from the pre-loop snapshot (not a re-glob
+        # -- Steps 2/4 write generated .def files into ${_mingw_common} too).
+        if [[ ${#_orig_defs[@]} -gt 0 ]]; then
+          for _def in "${_orig_defs[@]}"; do
+            _stem="$(basename "${_def%.def}")"
+            _is_helper_stem "${_stem}" && continue
+            _gen_implib "${_stem}" "${_def}" "${_ia_outdir}"
+          done
+        fi
+
+        # Step 2: .def.in template files (ws2_32, kernel32, ole32, advapi32, user32, ...)
+        # Preprocessed per arch so F_I386/F_NON_ARM64/F64-style macros expand
+        # to this arch's exports.
+        for _def_in in "${_mingw_common}"/*.def.in; do
+          [[ -f "${_def_in}" ]] || continue
+          _stem="$(basename "${_def_in%.def.in}")"
+          if _is_helper_stem "${_stem}"; then
+            continue
+          fi
+          _lib="${_ia_outdir}/lib${_stem}.a"
+          if [[ -f "${_lib}" ]]; then
+            continue
+          fi
+          _def="${_ia_outdir}/${_stem}.def"
+          if [[ ! -f "${_def}" ]]; then
+            "${_zig_bin}" cc -E -P \
+              -target "${_ia_target}" \
+              -x assembler-with-cpp \
+              -I"${_def_include}" \
+              "${_def_in}" > "${_def}" 2> "${_def}.pp.err" || { _note_pp_skip "${_ia_arch}:${_stem}" "${_def}"; continue; }
+            rm -f "${_def}.pp.err"
+          fi
+          _gen_implib "${_stem}" "${_def}" "${_ia_outdir}"
+        done
+
+        # Step 3: uuid -- compiled from C source (no DLL, no import lib needed).
+        # zig compiles libsrc/uuid.c into a static archive.
+        _uuid_lib="${_ia_outdir}/libuuid.a"
+        _uuid_src="${_mingw_libsrc}/uuid.c"
+        if [[ ! -f "${_uuid_lib}" ]] && [[ -f "${_uuid_src}" ]]; then
+          _uuid_obj="${_ia_outdir}/_uuid.o"
+          if "${_zig_bin}" cc -target "${_ia_target}" -c "${_uuid_src}" \
+              -o "${_uuid_obj}" 2>/dev/null && \
+            "${_ar_cmd[@]}" rcs "${_uuid_lib}" "${_uuid_obj}" 2>/dev/null && [[ -s "${_uuid_lib}" ]]; then
+            _gen_count=$(( _gen_count + 1 ))
+          else
+            : # brush 0.4.0 $? guard
+            _gen_fail=$(( _gen_fail + 1 ))
+            _gen_failed="${_gen_failed} ${_ia_arch}:uuid"
+            rm -f "${_uuid_lib}"
+          fi
+          rm -f "${_uuid_obj}"
+        fi
+
+        dbg echo "=== [${_ia_arch}] import libs so far: ${_gen_count} (in ${_ia_outdir}) ==="
+
+        # Step 4: Supplemental import libs from mingw-w64 .def.in templates.
+        # Zig doesn't ship msvcrt.def -- we provide a complete mingw-w64 version
+        # that covers all exports (stdio, math, POSIX I/O, etc.).
+        # msvcrt.def.in uses #include "func.def.in" and #include "crt-aliases.def.in",
+        # both of which live in zig's own def-include/.  We also include zig's
+        # lib-common/ so any future templates can resolve ucrtbase-common.def.in etc.
+        _supp_defs="${RECIPE_DIR}/building/mingw-defs"
+        if [[ -d "${_supp_defs}" ]]; then
+          dbg echo "=== [${_ia_arch}] processing supplemental mingw-w64 .def.in templates ==="
+          for _supp_in in "${_supp_defs}"/*.def.in; do
+            [[ -f "${_supp_in}" ]] || continue
+            _supp_stem="$(basename "${_supp_in%.def.in}")"
+            if _is_helper_stem "${_supp_stem}"; then
+              continue
+            fi
+            _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
+            if [[ -f "${_supp_lib}" ]]; then
+              continue
+            fi
+            _supp_def="${_ia_outdir}/${_supp_stem}.def"
+            if [[ ! -f "${_supp_def}" ]]; then
+              "${_zig_bin}" cc -E -P \
+                -target "${_ia_target}" \
+                -x assembler-with-cpp \
+                -I"${_supp_defs}" \
+                -I"${_def_include}" \
+                -I"${_mingw_common}" \
+                "${_supp_in}" > "${_supp_def}" 2> "${_supp_def}.pp.err" || { _note_pp_skip "${_ia_arch}:${_supp_stem}" "${_supp_def}"; continue; }
+              rm -f "${_supp_def}.pp.err"
+            fi
+            _gen_implib "${_supp_stem}" "${_supp_def}" "${_ia_outdir}"
+          done
+          # Also process plain .def files (no preprocessing needed)
+          for _supp_def in "${_supp_defs}"/*.def; do
+            [[ -f "${_supp_def}" ]] || continue
+            _supp_stem="$(basename "${_supp_def%.def}")"
+            if _is_helper_stem "${_supp_stem}"; then
+              continue
+            fi
+            _supp_lib="${_ia_outdir}/lib${_supp_stem}.a"
+            [[ -f "${_supp_lib}" ]] && continue
+            _gen_implib "${_supp_stem}" "${_supp_def}" "${_ia_outdir}"
+          done
+          dbg echo "=== [${_ia_arch}] supplemental import libs done (total ${_gen_count}) ==="
+        fi
+      done
+
+      dbg echo "=== Generated ${_gen_count} import libs total across x86_64+aarch64+x86 ==="
+      if [[ "${_mingw_xt}" == "1" ]]; then { set -x; } 2>/dev/null; fi
+
+      echo "INFO: [_mingw] import libs generated=${_gen_count} failed=${_gen_fail} skipped=${_gen_skip}" >&2
+      if [[ "${_gen_skip}" -gt 0 ]]; then
+        echo "WARNING: [_mingw] skipped (preprocess failed):${_gen_skipped}" >&2
+      fi
+      if [[ "${_gen_fail}" -gt 0 ]]; then
+        echo "ERROR: [_mingw] failed import libs:${_gen_failed}" >&2
+        return 1
+      fi
+      # Hard floor against an import-lib generation collapse (reference doc S5.6/S3.11). failed>0 already aborts above; skipped>0 warns.
+      _gen_count_floor=2200
+      if [[ "${_gen_count}" -lt "${_gen_count_floor}" ]]; then
+        echo "ERROR: [_mingw] import lib count ${_gen_count} is below floor ${_gen_count_floor} (baseline 2355 measured on PR #181 / ac523b5b)" >&2
+        return 1
       fi
 
-      # Pre-compile MinGW CRT startup objects.
-      # Consumers explicitly link crt2.o (console exe), crt2win.o (GUI exe),
-      # and dllcrt2.o (DLL) as the first object file.  Zig compiles these
-      # internally, but flexlink searches for them on disk via -print-search-dirs
-      # paths.  Compile from zig's bundled MinGW CRT sources.
+      # Machine-type sanity check: a representative import lib per arch dir must
+      # carry that arch's COFF machine. Tooling problems or UNKNOWN only WARN;
+      # a known-vs-known mismatch fails the build.
+      # Windows conda ships python.exe with no python3.exe.
+      _coff_helper="${RECIPE_DIR}/building/coff_machine.py"
+      _coff_py=""
+      for _cand_py in "${PYTHON:-}" python3 python; do
+        [[ -n "${_cand_py}" ]] || continue
+        command -v "${_cand_py}" >/dev/null 2>&1 || continue
+        _coff_py="${_cand_py}"
+        break
+      done
+      _coff_bad=""
+      for _gen_pair in \
+          "x86_64|x86_64|${_mingw_common}" \
+          "arm64|aarch64|${_mingw_libarm64}" \
+          "i386|x86|${_mingw_lib32}"; do
+        IFS='|' read -r _gen_expect_machine _gen_pair_arch _gen_pair_dir <<< "${_gen_pair}"
+        _gen_rep_lib="${_gen_pair_dir}/libkernel32.a"
+        if [[ ! -f "${_gen_rep_lib}" ]]; then
+          _gen_rep_lib=""
+          for _cand_lib in "${_gen_pair_dir}"/*.a; do
+            [[ -f "${_cand_lib}" ]] || continue
+            _gen_rep_lib="${_cand_lib}"
+            break
+          done
+        fi
+        [[ -n "${_gen_rep_lib}" ]] || continue
+        if [[ -n "${_coff_py}" ]] && [[ -f "${_coff_helper}" ]]; then
+          _gen_helper_rc=0
+          _gen_helper_out="$("${_coff_py}" "${_coff_helper}" "${_gen_rep_lib}")" || _gen_helper_rc=$?
+          _gen_helper_out="${_gen_helper_out//$'\r'/}"
+          _gen_actual_machine="${_gen_helper_out##* }"
+          if [[ -z "${_gen_actual_machine}" || "${_gen_actual_machine}" == "UNKNOWN" ]]; then
+            echo "ERROR: [_mingw] could not determine machine type of ${_gen_rep_lib} (helper rc=${_gen_helper_rc}, output '${_gen_helper_out:-empty}')" >&2
+            return 1
+          fi
+          echo "INFO: [_mingw] ${_gen_pair_arch} $(basename "${_gen_rep_lib}") machine=${_gen_actual_machine} (expected ${_gen_expect_machine})"
+          if [[ "${_gen_actual_machine}" != "${_gen_expect_machine}" ]]; then
+            _coff_bad="${_coff_bad}  - ${_gen_pair_arch} (${_gen_pair_dir}): machine-type mismatch in $(basename "${_gen_rep_lib}"): expected ${_gen_expect_machine}, got ${_gen_actual_machine}
+"
+          fi
+        else
+          echo "WARNING: coff_machine.py helper or python interpreter unavailable; skipping machine-type check for ${_gen_pair_arch} (${_gen_pair_dir})" >&2
+        fi
+      done
+      if [[ -n "${_coff_bad}" ]]; then
+        echo "ERROR: [_mingw] import-lib machine-type check failed:" >&2
+        printf '%s' "${_coff_bad}" >&2
+        return 1
+      fi
+
+      # Steps 5+6: CRT startup objects and stub archives, emitted for all
+      # three Windows arches (same map as the cache-warm loop below).
       _mingw_crt="${_mingw_common}/../crt"
       _mingw_inc="${_mingw_common}/../include"
       _win_inc="${_zig_lib}/libc/include/any-windows-any"
-
+      _mingw_crt_exists=0
       if [[ -d "${_mingw_crt}" ]]; then
-        dbg echo "=== Compiling MinGW CRT startup objects from ${_mingw_crt} -> ${_crt_outdir} ==="
+        _mingw_crt_exists=1
         dbg echo "=== CRT sources: $(ls "${_mingw_crt}" | tr '\n' ' ') ==="
+      else
+        dbg echo "=== MinGW CRT sources not found at ${_mingw_crt} ==="
+      fi
+
+      # Helper: compile one CRT object, surface errors (do NOT swallow).
+      # Captures stderr to a log; on success emits dbg trace; on failure
+      # prints log to stderr and returns 1 to abort import-lib generation.
+      _compile_crt_obj() {
+        local src="$1" obj="$2" extra="${3:-}"
+        local log="${obj}.log"
+        # shellcheck disable=SC2086
+        if "${_zig_bin}" cc "${_crt_flags[@]}" ${extra} "${src}" -o "${obj}" >"${log}" 2>&1; then
+          dbg cat "${log}"
+          dbg echo "=== Compiled $(basename "${obj}") ==="
+          rm -f "${log}"
+          return 0
+        fi
+        echo "ERROR: failed to compile $(basename "${obj}") for ${_win_target}:" >&2
+        cat "${log}" >&2
+        rm -f "${log}"
+        return 1
+      }
+
+      # Helper: compile a one-symbol weak C stub and archive it.
+      # Args: out_dir  target_triple  lib_name
+      _stub_rel_warned=0
+      _create_stub_lib_archive() {
+        local out_dir="$1"
+        local target_triple="$2"
+        local lib_name="$3"
+        local lib_path="${out_dir}/lib${lib_name}.a"
+        [[ -f "${lib_path}" ]] && return 0
+        # Sanitize lib_name to a valid C identifier (replace +, -, . with _)
+        local sym_name
+        sym_name="$(printf '%s' "${lib_name}" | tr -c 'a-zA-Z0-9_' '_')"
+        local stub_base=".zig_${sym_name}_stub"
+        local stub_c="${out_dir}/${stub_base}.c"
+        local stub_o="${out_dir}/${stub_base}.o"
+        local stub_log="${out_dir}/${stub_base}.log"
+        printf 'int __zig_%s_stub __attribute__((weak)) = 0;\n' "${sym_name}" > "${stub_c}"
+        # The DepTokenizer patch lets zig parse drive-less roots (\bld\...); the rel
+        # and member-less archive fallbacks stay as regression signals.
+        local stub_mode
+        local _stub_abs_err
+        if "${_zig_bin}" cc -c "${stub_c}" -o "${stub_o}" -target "${target_triple}" 2>"${stub_log}"; then
+          stub_mode="abs"
+        else
+          _stub_abs_err="$(cat "${stub_log}")"
+          if ( cd "${out_dir}" && "${_zig_bin}" cc -c "${stub_base}.c" -o "${stub_base}.o" -target "${target_triple}" ) 2>>"${stub_log}"; then
+            stub_mode="rel"
+            if [[ "${_stub_rel_warned}" == "0" ]]; then
+              echo "WARN: [_mingw] stub compile via absolute path is failing; using relative-path fallback (mode=rel)" >&2
+              echo "  abs-path: ${stub_c}" >&2
+              sed -n '1,10s/^/  abs-probe: /p' <<<"${_stub_abs_err}" >&2
+              _stub_rel_warned=1
+            fi
+          else
+            : # brush 0.4.0 $? guard
+            stub_mode="empty"
+          fi
+        fi
+        if [[ "${stub_mode}" == "empty" ]]; then
+          echo "WARNING: [_mingw] stub compile failed for lib${lib_name}.a (${target_triple}); using member-less archive" >&2
+          cat "${stub_log}" >&2 || true
+          if ! "${_ar_cmd[@]}" rcs "${lib_path}" 2>>"${stub_log}"; then
+            echo "ERROR: [_mingw] failed to archive ${lib_path} (${target_triple}):" >&2
+            cat "${stub_log}" >&2 || true
+            rm -f "${stub_c}" "${stub_o}" "${stub_log}"
+            return 1
+          fi
+        elif ! "${_ar_cmd[@]}" rcs "${lib_path}" "${stub_o}" 2>>"${stub_log}"; then
+          echo "ERROR: [_mingw] failed to archive ${lib_path} (${target_triple}):" >&2
+          cat "${stub_log}" >&2 || true
+          rm -f "${stub_c}" "${stub_o}" "${stub_log}"
+          return 1
+        fi
+        echo "INFO: [_mingw] stub archive: ${lib_path} (mode=${stub_mode})" >&2
+        rm -f "${stub_c}" "${stub_o}" "${stub_log}"
+      }
+
+      for _crt_entry in \
+          "x86_64-windows-gnu:${_mingw_common}" \
+          "aarch64-windows-gnu:${_mingw_libarm64}" \
+          "x86-windows-gnu:${_mingw_lib32}"; do
+        _win_target="${_crt_entry%%:*}"
+        _crt_outdir="${_crt_entry##*:}"
+        mkdir -p "${_crt_outdir}"
 
         # CRT compile flags must match zig's internal addCrtCcArgs (src/libs/mingw.zig)
         # exactly, otherwise oscalls.h and other internal headers reject inclusion via
@@ -243,97 +580,139 @@ SYNCHRONIZATION_DEF
                     -isystem "${_win_inc}"
                     -I"${_mingw_inc}")
 
-        # Helper: compile one CRT object, surface errors (do NOT swallow).
-        # Captures stderr to a log; on success emits dbg trace; on failure
-        # prints log to stderr and returns 1 to abort import-lib generation.
-        _compile_crt_obj() {
-          local src="$1" obj="$2" extra="${3:-}"
-          local log; log=$(mktemp)
-          # shellcheck disable=SC2086
-          if "${_zig_bin}" cc "${_crt_flags[@]}" ${extra} "${src}" -o "${obj}" >"${log}" 2>&1; then
-            dbg cat "${log}"
-            dbg echo "=== Compiled $(basename "${obj}") ==="
-            rm -f "${log}"
-            return 0
+        if [[ "${_mingw_crt_exists}" == "1" ]]; then
+          dbg echo "=== Compiling MinGW CRT startup objects from ${_mingw_crt} -> ${_crt_outdir} (${_win_target}) ==="
+
+          # crt2.o -- console application entry (main)
+          _crt2_obj="${_crt_outdir}/crt2.o"
+          if [[ ! -f "${_crt2_obj}" ]]; then
+            if [[ ! -f "${_mingw_crt}/crtexe.c" ]]; then
+              echo "ERROR: [_mingw] upstream contract broken: ${_mingw_crt}/crtexe.c missing" >&2
+              return 1
+            fi
+            _compile_crt_obj "${_mingw_crt}/crtexe.c" "${_crt2_obj}" || return 1
           fi
-          echo "ERROR: failed to compile $(basename "${obj}") for ${_win_target}:" >&2
-          cat "${log}" >&2
-          rm -f "${log}"
-          return 1
-        }
 
-        # crt2.o -- console application entry (main)
-        _crt2_obj="${_crt_outdir}/crt2.o"
-        if [[ ! -f "${_crt2_obj}" ]] && [[ -f "${_mingw_crt}/crtexe.c" ]]; then
-          _compile_crt_obj "${_mingw_crt}/crtexe.c" "${_crt2_obj}" || return 1
+          # crt2win.o -- GUI application entry (WinMain)
+          _crt2win_obj="${_crt_outdir}/crt2win.o"
+          if [[ ! -f "${_crt2win_obj}" ]]; then
+            if [[ ! -f "${_mingw_crt}/crtexewin.c" ]]; then
+              echo "ERROR: [_mingw] upstream contract broken: ${_mingw_crt}/crtexewin.c missing" >&2
+              return 1
+            fi
+            _compile_crt_obj "${_mingw_crt}/crtexewin.c" "${_crt2win_obj}" "-D_WINDOWS" || return 1
+          fi
+
+          # dllcrt2.o -- DLL entry (DllMain)
+          _dllcrt2_obj="${_crt_outdir}/dllcrt2.o"
+          if [[ ! -f "${_dllcrt2_obj}" ]]; then
+            if [[ ! -f "${_mingw_crt}/crtdll.c" ]]; then
+              echo "ERROR: [_mingw] upstream contract broken: ${_mingw_crt}/crtdll.c missing" >&2
+              return 1
+            fi
+            _compile_crt_obj "${_mingw_crt}/crtdll.c" "${_dllcrt2_obj}" || return 1
+          fi
         fi
 
-        # crt2win.o -- GUI application entry (WinMain)
-        _crt2win_obj="${_crt_outdir}/crt2win.o"
-        if [[ ! -f "${_crt2win_obj}" ]] && [[ -f "${_mingw_crt}/crtexewin.c" ]]; then
-          _compile_crt_obj "${_mingw_crt}/crtexewin.c" "${_crt2win_obj}" "-D_WINDOWS" || return 1
-        fi
-
-        # dllcrt2.o -- DLL entry (DllMain)
-        _dllcrt2_obj="${_crt_outdir}/dllcrt2.o"
-        if [[ ! -f "${_dllcrt2_obj}" ]] && [[ -f "${_mingw_crt}/crtdll.c" ]]; then
-          _compile_crt_obj "${_mingw_crt}/crtdll.c" "${_dllcrt2_obj}" || return 1
-        fi
-      else
-        dbg echo "=== MinGW CRT sources not found at ${_mingw_crt} ==="
-      fi
-
-      # Step 6: empty stub archives for libs external consumers expect by convention
-      # but zig folds elsewhere (winpthread -> mingw32), uses compiler-rt for
-      # (gcc, gcc_eh, ssp), or doesn't provide (stdc++).  These satisfy -lXXX
-      # filename checks without symbols; any actual symbol references must be
-      # satisfied by other libs the consumer links.
-      #
-      # Helper: compile a one-symbol weak C stub and archive it.
-      # Args: out_dir  target_triple  lib_name
-      _create_stub_lib_archive() {
-        local out_dir="$1"
-        local target_triple="$2"
-        local lib_name="$3"
-        local lib_path="${out_dir}/lib${lib_name}.a"
-        [[ -f "${lib_path}" ]] && return 0
-        # Sanitize lib_name to a valid C identifier (replace +, -, . with _)
-        local sym_name
-        sym_name="$(printf '%s' "${lib_name}" | tr -c 'a-zA-Z0-9_' '_')"
-        local stub_c="${out_dir}/.zig_${sym_name}_stub.c"
-        local stub_o="${out_dir}/.zig_${sym_name}_stub.o"
-        printf 'int __zig_%s_stub __attribute__((weak)) = 0;\n' "${sym_name}" > "${stub_c}"
-        if ! "${_zig_bin}" cc -c "${stub_c}" -o "${stub_o}" -target "${target_triple}" 2>/dev/null; then
-          rm -f "${stub_c}" "${stub_o}"
-          return 1
-        fi
-        if ! "${_zig_bin}" ar rcs "${lib_path}" "${stub_o}" 2>/dev/null; then
-          rm -f "${stub_c}" "${stub_o}"
-          return 1
-        fi
-        rm -f "${stub_c}" "${stub_o}"
-        dbg echo "[_mingw] stub archive: ${lib_path}"
-      }
-
-      dbg echo "=== Generating stub archives for ${_win_target} in ${_crt_outdir} ==="
-      # Real archives ship for all three arches now (cache-warm loop below),
-      # so only the toolchain convenience libs need empty stubs.
-      local _stub_libs=(gcc gcc_eh stdc++ ssp)
-      for _stub_lib in "${_stub_libs[@]}"; do
-        _create_stub_lib_archive "${_crt_outdir}" "${_win_target}" "${_stub_lib}"
+        dbg echo "=== Generating stub archives for ${_win_target} in ${_crt_outdir} ==="
+        # Real archives ship for all three arches now (cache-warm loop below),
+        # so only the toolchain convenience libs need empty stubs.
+        local _stub_libs=(gcc gcc_eh stdc++ ssp)
+        for _stub_lib in "${_stub_libs[@]}"; do
+          _create_stub_lib_archive "${_crt_outdir}" "${_win_target}" "${_stub_lib}"
+        done
       done
 
       # Cache-warm + stage real libmingw32.lib for all three Windows targets so
       # non-zig linkers (flexlink, mingw-gcc) can resolve -lmingw32 / -lucrt /
       # -lmingwex / -lwinpthread without falling back to empty stubs. Zig compiles
-      # its full mingw source tree into a single ~10MB libmingw32.lib at link time
+      # its full mingw source tree into a single ~11MB libmingw32.lib at link time
       # and caches it; we trigger materialization with a real link of a tiny program
       # that references snprintf + pthread_self, then harvest the cached artifact.
       # Each target gets its own ZIG_GLOBAL_CACHE_DIR to avoid cross-arch contamination.
-      # Soft-fail on missing libmingw32.lib: WARN + continue (not a hard error).
+      # Failures are recorded per target and aggregated; if ANY target fails,
+      # the function fails after the loop (see the FATAL check below).
+
+      # setjmp.h strip: fallback for bootstraps that predate mingw-setjmp-no-crtimp.patch.
+      _bp_setjmp="${BUILD_PREFIX}/lib/zig/libc/include/any-windows-any/setjmp.h"
+      [[ -f "${_bp_setjmp}" ]] || _bp_setjmp="${BUILD_PREFIX}/Library/lib/zig/libc/include/any-windows-any/setjmp.h"
+      if [[ -f "${_bp_setjmp}" ]]; then
+        # Unconditional (not dbg-gated): pattern drift here is the expected
+        # failure mode when an upstream zig snapshot reformats this declaration.
+        _bp_notfound_msg="INFO: [_mingw] no _CRTIMP on _setjmp3 in bootstrap setjmp.h (${_bp_setjmp}); expected - our ungated mingw-setjmp-no-crtimp.patch already fixed the bootstrap we pin. Absence is asserted below."
+        if command -v grep >/dev/null 2>&1 && command -v sed >/dev/null 2>&1; then
+          if grep -qE '^_CRTIMP int __cdecl .*_setjmp3?\(' "${_bp_setjmp}"; then
+            sed -i.zigbak -E 's/^_CRTIMP( int __cdecl .*_setjmp3?\()/\1/' "${_bp_setjmp}"
+            dbg echo "[_mingw] stripped _CRTIMP from bootstrap setjmp.h: ${_bp_setjmp}"
+          else
+            echo "${_bp_notfound_msg}" >&2
+          fi
+        elif [[ -r "${_bp_setjmp}" ]]; then
+          # grep/sed not on PATH (Windows CI): pure-bash equivalent of
+          # s/^_CRTIMP( int __cdecl .*_setjmp3?\()/\1/, no external tools needed.
+          _bp_changed=0
+          _bp_no_final_nl=0
+          _bp_tmp="${_bp_setjmp}.tmp$$"
+          : > "${_bp_tmp}"
+          _bp_xt=0
+          if [[ "${DEBUG_ZIG_BUILD:-0}" != "1" ]]; then
+            case $- in *x*) _bp_xt=1 ;; esac
+            { set +x; } 2>/dev/null
+          fi
+          # Silence xtrace for per-line loop to avoid flooding log.
+          while IFS= read -r line || { _bp_no_final_nl=1; [[ -n "${line}" ]]; }; do
+            if [[ "${line}" == "_CRTIMP int __cdecl "* && "${line}" == *"_setjmp"* && "${line}" == *"("* ]]; then
+              line="${line#_CRTIMP}"
+              _bp_changed=1
+            fi
+            if [[ "${_bp_no_final_nl}" == "1" ]]; then
+              printf '%s' "${line}" >> "${_bp_tmp}"
+            else
+              printf '%s\n' "${line}" >> "${_bp_tmp}"
+            fi
+          done < "${_bp_setjmp}"
+          if [[ "${_bp_xt}" == "1" ]]; then { set -x; } 2>/dev/null; fi
+          if [[ "${_bp_changed}" == "1" ]]; then
+            cp "${_bp_setjmp}" "${_bp_setjmp}.zigbak"
+            mv "${_bp_tmp}" "${_bp_setjmp}"
+            dbg echo "[_mingw] stripped _CRTIMP from bootstrap setjmp.h via bash: ${_bp_setjmp}"
+          else
+            rm -f "${_bp_tmp}"
+            echo "${_bp_notfound_msg}" >&2
+          fi
+        else
+          echo "WARN: [_mingw] bootstrap setjmp.h unreadable; _CRTIMP strip on bootstrap setjmp.h SKIPPED" >&2
+        fi
+
+        # The strip above is warn-and-continue and cannot tell "already fixed"
+        # from "silently still broken", so assert absence here: a surviving
+        # _CRTIMP on _setjmp3 is fatal, not a warning.
+        _bp_still=0
+        if command -v grep >/dev/null 2>&1; then
+          if grep -qE '^_CRTIMP int __cdecl .*_setjmp3?\(' "${_bp_setjmp}"; then _bp_still=1; fi
+        elif [[ -r "${_bp_setjmp}" ]]; then
+          while IFS= read -r line || [[ -n "${line}" ]]; do
+            if [[ "${line}" == "_CRTIMP int __cdecl "* && "${line}" == *"_setjmp"* && "${line}" == *"("* ]]; then
+              _bp_still=1
+              break
+            fi
+          done < "${_bp_setjmp}"
+        fi
+        if [[ "${_bp_still}" == "1" ]]; then
+          echo "FATAL: [_mingw] _CRTIMP still present on _setjmp3 in bootstrap setjmp.h (${_bp_setjmp}) after strip; warm link will fail" >&2
+          return 1
+        fi
+      else
+        echo "WARN: [_mingw] bootstrap setjmp.h not found; warm link may fail on _setjmp3" >&2
+      fi
+
       local _warm_dir
       _warm_dir="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/zig-warm-$$")"
       mkdir -p "${_warm_dir}"
+      # Normalize to a native path so MSYS argv translation to zig.exe agrees.
+      if command -v cygpath >/dev/null 2>&1; then
+        _warm_dir="$(cygpath -m "${_warm_dir}")"
+      fi
       cat > "${_warm_dir}/warm.c" <<'WARM_EOF'
 #include <stdio.h>
 #include <pthread.h>
@@ -343,12 +722,42 @@ int main(void) {
     return 0;
 }
 WARM_EOF
+      cat > "${_warm_dir}/warm.cpp" <<'WARM_EOF'
+#include <string>
+#include <stdexcept>
+int main() {
+    try { throw std::runtime_error(std::string("warm")); }
+    catch (const std::exception &e) { return e.what()[0] == 'w' ? 0 : 1; }
+}
+WARM_EOF
 
-      # Pre-initialize cross-arch staging paths so the multi-target cache-warm loop
-      # below can reference them regardless of which arch this function call targets.
-      # The if/elif block at lines 205–215 only sets these conditionally per arch.
-      : "${_mingw_libarm64:=${_mingw_common}/../libarm64}"
-      : "${_mingw_lib32:=${_mingw_common}/../lib32}"
+      # ${_mingw_libarm64}/${_mingw_lib32} are already set unconditionally by
+      # the import-lib generation loop above, ahead of any arch branching.
+
+      # Aggregate cache-warm failures so a Windows arch whose CRT archives go
+      # missing fails the build loudly instead of shipping silently.
+      local _warm_failed_count=0
+      local _warm_failed_list=""
+
+      # Recursive basename search (find removed). Silent on missing/empty
+      # dir, same tolerance as the old `find ... 2>/dev/null`.
+      function _find_by_basename() {
+        local dir="$1" name="$2" entry found
+        for entry in "${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do
+          [[ -e "${entry}" ]] || continue
+          if [[ -d "${entry}" ]]; then
+            found="$(_find_by_basename "${entry}" "${name}")"
+            if [[ -n "${found}" ]]; then
+              printf '%s\n' "${found}"
+              return 0
+            fi
+          elif [[ "${entry##*/}" == "${name}" ]]; then
+            printf '%s\n' "${entry}"
+            return 0
+          fi
+        done
+        return 1
+      }
 
       # Map: zig target triple -> staging dir name under lib/libc/mingw/
       for _warm_pair in \
@@ -366,15 +775,38 @@ WARM_EOF
                   "${_zig_bin}" cc -target "${_warm_tgt}" -pthread \
                   "${_warm_dir}/warm.c" \
                   -o "${_warm_cache}/warm.exe" 2>"${_warm_cache}/warm.err"; then
-              echo "WARN: cache-warm failed for ${_warm_tgt}; skipping stage. Errors:" >&2
+              echo "ERROR: cache-warm link failed for ${_warm_tgt}; CRT archives will be missing. Errors:" >&2
               tail -5 "${_warm_cache}/warm.err" >&2 || true
+              _warm_failed_count=$((_warm_failed_count + 1))
+              _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(link)"
               continue
           fi
 
           local _warm_lib
-          _warm_lib="$(find "${_warm_cache}" -name 'libmingw32.lib' -print -quit 2>/dev/null)"
+          _warm_lib="$(_find_by_basename "${_warm_cache}" 'libmingw32.lib')" || true
           if [[ -z "${_warm_lib}" || ! -f "${_warm_lib}" ]]; then
-              echo "WARN: libmingw32.lib not found in cache for ${_warm_tgt}; skipping stage" >&2
+              echo "ERROR: libmingw32.lib not found in cache for ${_warm_tgt}; CRT archives will be missing" >&2
+              _warm_failed_count=$((_warm_failed_count + 1))
+              _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(no-libmingw32)"
+              continue
+          fi
+
+          # Byte-size floor: a truncated-but-non-empty libmingw32.lib would
+          # otherwise pass every check above. Floor 9500000 is ~11% under the
+          # smallest class we measure, win-64 (win-arm64 runs ~12KB larger,
+          # osx ~0.7MB larger). No exact byte count is quoted here on purpose:
+          # the same tree on the same host jitters by tens of bytes between
+          # builds, so any exact "smallest measured" figure is falsified by the
+          # next board. Dated per-job figures live in the reference doc,
+          # section 5.6. Size is logged unconditionally so future boards can
+          # tighten the floor on evidence.
+          local _warm_lib_size
+          _warm_lib_size="$(wc -c < "${_warm_lib}" 2>/dev/null || echo 0)"
+          echo "INFO: [_mingw] libmingw32.lib size for ${_warm_tgt}: ${_warm_lib_size} bytes" >&2
+          if [[ "${_warm_lib_size}" -lt 9500000 ]]; then
+              echo "ERROR: libmingw32.lib for ${_warm_tgt} is ${_warm_lib_size} bytes, below floor 9500000 (truncated?)" >&2
+              _warm_failed_count=$((_warm_failed_count + 1))
+              _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(size-${_warm_lib_size})"
               continue
           fi
 
@@ -391,13 +823,78 @@ WARM_EOF
               cp -f "${_warm_lib}" "${_warm_stage}/${_name}.a"
           done
           dbg echo "[_mingw] staged libmingw32+aliases for ${_warm_tgt} under ${_warm_stage}"
+
+          # Real C++ link: zig builds libc++/libc++abi/libunwind on demand into its
+          # cache; stage them so foreign linkers (flexlink) can resolve -lc++ etc.
+          # -mcpu=baseline: on a native lane target==host and zig would otherwise
+          # tune for the build machine's CPU.
+          if ! ZIG_GLOBAL_CACHE_DIR="${_warm_cache}" \
+                  "${_zig_bin}" c++ -target "${_warm_tgt}" -mcpu=baseline -O2 \
+                  "${_warm_dir}/warm.cpp" \
+                  -o "${_warm_cache}/warm-cxx.exe" 2>"${_warm_cache}/warm-cxx.err"; then
+              echo "ERROR: C++ cache-warm link failed for ${_warm_tgt}; libc++ archives will be missing. Errors:" >&2
+              tail -5 "${_warm_cache}/warm-cxx.err" >&2 || true
+              _warm_failed_count=$((_warm_failed_count + 1))
+              _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(cxx-link)"
+              continue
+          fi
+
+          # zig caches these WITHOUT the lib prefix (c++.lib, c++abi.lib, unwind.lib),
+          # unlike libmingw32.lib; lib<name>.a tried second.
+          for _cxx_name in libc++ libc++abi libunwind; do
+              _cxx_src="$(_find_by_basename "${_warm_cache}" "${_cxx_name#lib}.lib")" || true
+              if [[ -z "${_cxx_src}" || ! -f "${_cxx_src}" ]]; then
+                  _cxx_src="$(_find_by_basename "${_warm_cache}" "${_cxx_name}.a")" || true
+              fi
+              if [[ -z "${_cxx_src}" || ! -f "${_cxx_src}" ]]; then
+                  if [[ "${_cxx_name}" == "libunwind" ]]; then
+                      # Optional: windows-gnu may use SEH and never build libunwind.
+                      echo "INFO: [_mingw] ${_cxx_name} not found in cache for ${_warm_tgt} (optional, not staged)" >&2
+                  else
+                      echo "ERROR: ${_cxx_name} not found in cache for ${_warm_tgt}" >&2
+                      _warm_failed_count=$((_warm_failed_count + 1))
+                      _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(no-${_cxx_name})"
+                  fi
+                  continue
+              fi
+              _cxx_size="$(wc -c < "${_cxx_src}" 2>/dev/null || echo 0)"
+              echo "INFO: [_mingw] ${_cxx_name} found for ${_warm_tgt}: ${_cxx_src##*/}, ${_cxx_size} bytes" >&2
+              # Floor is loose on purpose, pending measured sizes.
+              if [[ "${_cxx_name}" == "libc++" && "${_cxx_size}" -lt 100000 ]]; then
+                  echo "ERROR: libc++ for ${_warm_tgt} is ${_cxx_size} bytes, below floor 100000 (stub?)" >&2
+                  _warm_failed_count=$((_warm_failed_count + 1))
+                  _warm_failed_list="${_warm_failed_list} ${_warm_tgt}(libc++-size-${_cxx_size})"
+                  continue
+              fi
+              cp -f "${_cxx_src}" "${_warm_stage}/${_cxx_name}.lib"
+              cp -f "${_cxx_src}" "${_warm_stage}/${_cxx_name}.a"
+          done
       done
 
       rm -rf "${_warm_dir}"
 
+      # Fail loudly rather than shipping a zig_impl whose libarm64/ or lib32/
+      # CRT archives are silently absent -- that is the published-build-10
+      # failure mode, and it surfaces downstream at LINK time for win-arm64 /
+      # win-32 consumers rather than here.
+      if [[ "${_warm_failed_count}" -gt 0 ]]; then
+        echo "FATAL: ${_warm_failed_count} Windows target(s) failed to cache-warm:${_warm_failed_list}" >&2
+        return 1
+      fi
+
       dbg echo "=== Stub archive generation done ==="
 
     else
+      : # brush 0.4.0 $? guard
+      _mingw_skip_reason=""
+      if [[ -z "${_dlltool}" ]]; then
+        _mingw_skip_reason="${_mingw_skip_reason}dlltool not found; "
+      fi
+      if [[ ! -x "${_zig_bin}" ]]; then
+        _mingw_skip_reason="${_mingw_skip_reason}zig_bin not executable; "
+      fi
+      # WARN only: promote to ERROR once CI shows whether this branch is ever legitimately taken.
+      echo "WARNING: [_mingw] import-lib pre-generation SKIPPED ENTIRELY (${_mingw_skip_reason}dlltool=${_dlltool:-<not found>} zig_bin=${_zig_bin}); no import libs generated, no import-lib checks ran" >&2
       dbg echo "=== llvm-dlltool or zig not found; skipping import lib pre-generation ==="
     fi
   fi

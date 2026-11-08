@@ -12,10 +12,11 @@
  * The R1-R9 de-dup rules (see recipe/building/flag_rules.py) are delegated
  * to the generated, portable zig_translate_flags() (_translate.inc). Only
  * out-of-scope hand-written translations/drops remain below: -Wl,-e<sym>
- * entry-symbol translation, MSVC /MANIFEST* drops, GCC-only flag drops,
- * the non-Bsymbolic -Xlinker pair drop, and the LLD-trigger scans not
- * owned by R8/R9 (--version-script/--dynamic-list/--gc-sections/
- * --build-id/--allow-shlib-undefined).
+ * entry-symbol translation, -l:<file> exact-filename resolution against
+ * -L dirs, MSVC /MANIFEST* drops, GCC-only flag drops, the non-Bsymbolic
+ * -Xlinker pair drop, and the LLD-trigger scans not owned by R8/R9
+ * (--version-script/--dynamic-list/--gc-sections/--build-id/
+ * --allow-shlib-undefined).
  *
  * Placeholders replaced at install time:
  *   ZIG_CC_MODE      - "cc" or "c++"
@@ -27,7 +28,9 @@
  */
 
 #include "nonunix_common.h"
+#include "nonunix_spawn.h"
 #include "_translate.inc"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +81,66 @@ static char *translate_wl_entry(const char *arg)
     if (!out) return NULL;
     snprintf(out, len, "-Wl,--entry,%s", sym);
     return out;
+}
+
+/*
+ * Collect -L search directories from argv, in order, handling both the
+ * spaced (-L <dir>) and concatenated (-L<dir>) forms. Used to resolve
+ * -l:<file> tokens (see resolve_l_colon). Caller owns *out_dirs (free()).
+ */
+static void collect_l_dirs(char *const *argv, int argc, const char ***out_dirs, int *out_n) {
+    const char **dirs = (const char **)malloc(sizeof(char *) * (size_t)(argc + 1));
+    int n = 0;
+    if (dirs) {
+        for (int i = 0; i < argc; i++) {
+            const char *a = argv[i];
+            if (str_eq(a, "-L")) {
+                if (i + 1 < argc) dirs[n++] = argv[++i];
+            } else if (starts_with(a, "-L") && a[2] != '\0') {
+                dirs[n++] = a + 2;
+            }
+        }
+    }
+    *out_dirs = dirs;
+    *out_n = n;
+}
+
+/*
+ * GNU ld/gcc -l:<file> means: search the -L dirs in order for a file with
+ * that EXACT name and link it as an input file. Resolving it here (instead
+ * of forwarding -l:<file> to zig) preserves that semantics exactly and
+ * avoids zig 0.17's driver panic ("reached unreachable code") on the -l:
+ * token. Returns a malloc'd resolved path (first match wins), or NULL if
+ * not found in any -L dir. On malloc failure sets *oom = 1 and returns
+ * NULL, distinct from the not-found case (*oom = 0).
+ */
+static char *resolve_l_colon(const char *filename, const char **dirs, int n_dirs, int *oom) {
+    *oom = 0;
+    size_t max_dir_len = 0;
+    for (int i = 0; i < n_dirs; i++) {
+        size_t len = strlen(dirs[i]);
+        if (len > max_dir_len) max_dir_len = len;
+    }
+    size_t buf_size = max_dir_len + 1 + strlen(filename) + 1;
+    char *scratch = (char *)malloc(buf_size);
+    if (!scratch) {
+        *oom = 1;
+        return NULL;
+    }
+    char *result = NULL;
+    for (int i = 0; i < n_dirs; i++) {
+        snprintf(scratch, buf_size, "%s/%s", dirs[i], filename);
+        FILE *f = fopen(scratch, "rb");
+        if (f) {
+            fclose(f);
+            result = (char *)malloc(strlen(scratch) + 1);
+            if (result) strcpy(result, scratch);
+            else *oom = 1;
+            break;
+        }
+    }
+    free(scratch);
+    return result;
 }
 
 /* -Xlinker passthrough flags to drop.
@@ -168,22 +231,182 @@ static int is_xlinker_lld_trigger(const char *arg) {
 
 /* --- Find zig binary --- */
 static int find_zig(char *out, size_t out_size) {
-    const char *conda = getenv("CONDA_PREFIX");
-    if (conda && conda[0]) {
-        snprintf(out, out_size, "%s\\Library\\bin\\%s", conda, ZIG_BIN_NAME);
-        if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES)
+    return zig_find_in_prefixes(out, out_size, ZIG_BIN_NAME) != NULL;
+}
+
+/* --- x86_64 mingw C++ runtime: conda-forge GCC libstdc++, not zig libc++ --- */
+
+#define CXX_PATH_MAX 1024
+#define GCC_TRIPLET "x86_64-w64-mingw32"
+
+static int cxx_runtime_optout(int argc, char **argv) {
+    const char *rt = getenv("ZIG_CXX_RUNTIME");
+    if (rt && str_eq(rt, "zig"))
+        return 1;
+    for (int i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        if (str_eq(a, "-nostdlib++") || str_eq(a, "-nostdlib") ||
+            str_eq(a, "-nodefaultlibs") || starts_with(a, "-stdlib=") ||
+            str_eq(a, "-nostdinc++") || str_eq(a, "-nostdinc") ||
+            str_eq(a, "-static") || str_eq(a, "-static-libstdc++"))
             return 1;
     }
     return 0;
 }
 
+static int path_is_dir(const char *p) {
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static int path_is_file(const char *p) {
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* 1 if the invocation links: no compile-only/query flag and at least one
+ * existing input file (or @response file). */
+static int invocation_links(const char **args, int n) {
+    int has_input = 0;
+    for (int i = 0; i < n; i++) {
+        const char *a = args[i];
+        if (str_eq(a, "-c") || str_eq(a, "-S") || str_eq(a, "-E") ||
+            str_eq(a, "-M") || str_eq(a, "-MM") || str_eq(a, "-fsyntax-only") ||
+            str_eq(a, "-###") || str_eq(a, "--version") || str_eq(a, "--help") ||
+            starts_with(a, "-print-") || starts_with(a, "-dump"))
+            return 0;
+        if (a[0] == '@' ? path_is_file(a + 1) : (a[0] != '-' && path_is_file(a)))
+            has_input = 1;
+    }
+    return has_input;
+}
+
+/* Numeric compare of dotted version strings (digits and dots only). */
+static int version_cmp(const char *a, const char *b) {
+    while (*a || *b) {
+        char *ea, *eb;
+        long x = strtol(a, &ea, 10), y = strtol(b, &eb, 10);
+        if (x != y)
+            return x < y ? -1 : 1;
+        a = *ea == '.' ? ea + 1 : ea;
+        b = *eb == '.' ? eb + 1 : eb;
+    }
+    return 0;
+}
+
+/* <prefix>\Library\lib\gcc\<triplet>\<highest version with include\c++>. */
+static int find_gcc_dir(const char *prefix, char *out, size_t outsz) {
+    char base[CXX_PATH_MAX], pat[CXX_PATH_MAX], probe[CXX_PATH_MAX], best[64] = "";
+    int n = snprintf(base, sizeof base, "%s\\Library\\lib\\gcc\\" GCC_TRIPLET, prefix);
+    if (n <= 0 || (size_t)n >= sizeof base)
+        return -1;
+    snprintf(pat, sizeof pat, "%s\\*", base);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return -1;
+    do {
+        const char *v = fd.cFileName;
+        size_t vl = strlen(v);
+        if (!vl || v[0] == '.' || strspn(v, "0123456789.") != vl || vl >= sizeof best)
+            continue;
+        n = snprintf(probe, sizeof probe, "%s\\%s\\include\\c++", base, v);
+        if (n <= 0 || (size_t)n >= sizeof probe || !path_is_dir(probe))
+            continue;
+        if (!best[0] || version_cmp(v, best) > 0)
+            memcpy(best, v, vl + 1);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    if (!best[0])
+        return -1;
+    n = snprintf(out, outsz, "%s\\%s", base, best);
+    return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+}
+
+static char cxx_slots[6][CXX_PATH_MAX];
+
+__attribute__((format(printf, 2, 3)))
+static const char *cxx_fmt(int slot, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(cxx_slots[slot], CXX_PATH_MAX, fmt, ap);
+    va_end(ap);
+    return (n > 0 && n < CXX_PATH_MAX) ? cxx_slots[slot] : NULL;
+}
+
+/* Fill pre (before user args, at most 1) and post (after, at most 7) with the
+ * flags that build C++ against the GCC libstdc++ under <prefix>; returns -1
+ * (after an error on stderr) if it is not found.  reset_x: user args set -x,
+ * so end it before the appended libs.  Full paths, never -l: _mingw.sh ships
+ * empty libstdc++.a/libgcc stubs a -l lookup could hit. */
+static int mingw_libstdcxx_args(const char *prefix, int links, int reset_x,
+                                const char **pre, int *n_pre,
+                                const char **post, int *n_post) {
+    char gcc[CXX_PATH_MAX];
+    const char *i1 = NULL, *i2 = NULL, *l1 = NULL, *l2 = NULL, *l3 = NULL;
+    if (prefix && find_gcc_dir(prefix, gcc, sizeof gcc) == 0) {
+        /* -I, not -isystem: zig's mingw libc -isystem dirs precede user ones,
+         * so libstdc++'s #include_next <stdlib.h> would find nothing after. */
+        i1 = cxx_fmt(0, "-I%s\\include\\c++", gcc);
+        i2 = cxx_fmt(1, "-I%s\\include\\c++\\" GCC_TRIPLET, gcc);
+        l1 = cxx_fmt(2, "%s\\libstdc++.dll.a", gcc);
+        l2 = cxx_fmt(3, "%s\\libgcc_s.a", gcc);
+        const char *p1 = cxx_fmt(4, "%s\\Library\\x86_64-w64-mingw32\\sysroot\\usr\\lib\\libwinpthread.dll.a", prefix);
+        l3 = (p1 && path_is_file(p1)) ? p1 : cxx_fmt(5, "%s\\Library\\lib\\libwinpthread.dll.a", prefix);
+    }
+    if (!i1 || !i2 || !l1 || !path_is_file(l1)) {
+        fprintf(stderr, "ERROR: zig-%s: libstdc++.dll.a not found for " GCC_TRIPLET
+                        " under '%s\\Library\\lib\\gcc\\" GCC_TRIPLET "'"
+                        " (set ZIG_CXX_RUNTIME=zig or ZIG_WIN_ABI=msvc to skip)\n",
+                ZIG_CC_MODE, prefix ? prefix : "");
+        return -1;
+    }
+    pre[(*n_pre)++] = "-nostdlib++";
+    post[(*n_post)++] = i1;
+    post[(*n_post)++] = i2;
+    if (links) {
+        if (reset_x) {
+            post[(*n_post)++] = "-x";
+            post[(*n_post)++] = "none";
+        }
+        post[(*n_post)++] = l1;
+        if (l2 && path_is_file(l2))
+            post[(*n_post)++] = l2;
+        if (l3 && path_is_file(l3))
+            post[(*n_post)++] = l3;
+    }
+    return 1;
+}
+
+/* Target the wrapper injects: ZIG_TARGET, with its windows ABI swapped to
+ * ZIG_WIN_ABI (gnu|msvc) when that is set; anything else keeps the baked one. */
+static const char *injected_target(char *buf, size_t bufsz) {
+    const char *abi = getenv("ZIG_WIN_ABI");
+    if (!abi || !(str_eq(abi, "gnu") || str_eq(abi, "msvc")))
+        return ZIG_TARGET;
+    const char *sfx[2] = { "-windows-msvc", "-windows-gnu" };
+    size_t tl = strlen(ZIG_TARGET);
+    for (int i = 0; i < 2; i++) {
+        size_t sl = strlen(sfx[i]);
+        if (tl > sl && str_eq(ZIG_TARGET + tl - sl, sfx[i])) {
+            int n = snprintf(buf, bufsz, "%.*s-windows-%s", (int)(tl - sl), ZIG_TARGET, abi);
+            return (n > 0 && (size_t)n < bufsz) ? buf : ZIG_TARGET;
+        }
+    }
+    return ZIG_TARGET;
+}
+
+static int target_abi_is_gnu(const char *t) {
+    size_t tl = strlen(t), sl = strlen("-windows-gnu");
+    return tl >= sl && str_eq(t + tl - sl, "-windows-gnu");
+}
+
 int main(int argc, char *argv[]) {
     init_zig_global_cache_dir();
 
-    /* One CONDA_PREFIX getenv() call for the translate profile; the
-     * pre-existing getenv("CONDA_PREFIX") calls inside find_zig() are left
-     * untouched. */
-    const char *conda_prefix = getenv("CONDA_PREFIX");
+    /* Translate profile's prefix, resolved PREFIX-first against the
+     * `Library\lib\zig` marker -- same approach find_zig() uses for the binary. */
+    const char *conda_prefix = zig_prefix_with_subpath("Library\\lib\\zig");
 
     /* Pre-filter over the raw args (argv[0] excluded):
      *  - drop -Xlinker <arg> pairs not owned by the generated translator
@@ -236,6 +459,9 @@ int main(int argc, char *argv[]) {
     profile.zig_target_arch = ZIG_TARGET_ARCH;
 
     int mode_is_cxx = str_eq(ZIG_CC_MODE, "c++");
+    int cxx_gcc_wanted = mode_is_cxx && IS_MINGW_TARGET &&
+                         str_eq(ZIG_TARGET_ARCH, "x86_64") &&
+                         !cxx_runtime_optout(argc - 1, argv + 1);
     char **out_argv = NULL;
     int out_argc = 0;
     int use_lld_from_gen = 0;
@@ -272,20 +498,30 @@ int main(int argc, char *argv[]) {
     if (!find_zig(zig_path, MAX_PATH)) {
         fprintf(stderr, "ERROR: zig-%s: zig binary not found (%s)\n",
                 ZIG_CC_MODE, ZIG_BIN_NAME);
+        fprintf(stderr, "  PREFIX=%s\n",
+                getenv("PREFIX") ? getenv("PREFIX") : "(unset)");
         fprintf(stderr, "  CONDA_PREFIX=%s\n",
                 conda_prefix ? conda_prefix : "(unset)");
         free(out_argv);
         return 1;
     }
 
+    /* -L search dirs for -l:<file> resolution below, collected from the
+     * same argv the second pass iterates (order preserved through
+     * zig_translate_flags, which does not touch -L). */
+    const char **l_dirs = NULL;
+    int n_l_dirs = 0;
+    collect_l_dirs(out_argv, out_argc, &l_dirs, &n_l_dirs);
+
     /* Second pass over the generated output: hand-written translations and
-     * drops that stay out of R1-R9 scope (-Wl,-e<sym> entry rewrite, the
-     * 11 out-of-scope -Wl,* drops, GCC-only drops, MSVC manifest drops,
-     * and the self-injected -fuse-ld=lld). */
+     * drops that stay out of R1-R9 scope (-Wl,-e<sym> entry rewrite, -l:<file>
+     * exact-filename resolution, the 11 out-of-scope -Wl,* drops, GCC-only
+     * drops, MSVC manifest drops, and the self-injected -fuse-ld=lld). */
     const char **filtered = malloc(sizeof(char *) * (size_t)(out_argc + 1));
     if (!filtered) {
         fprintf(stderr, "ERROR: zig-%s: malloc failed\n", ZIG_CC_MODE);
         free(out_argv);
+        free(l_dirs);
         return 1;
     }
     int fi = 0;
@@ -299,6 +535,40 @@ int main(int argc, char *argv[]) {
                 filtered[fi++] = translated;
                 continue;
             }
+        }
+
+        /* -l:<file> resolution: zig's driver panics ("reached unreachable
+         * code") on this GNU exact-filename token. Resolve it against the
+         * -L dirs ourselves and pass the resolved path instead; a token
+         * that resolves nowhere is a hard error, not a silent passthrough
+         * into the panic. */
+        if (starts_with(arg, "-l:") && arg[3] != '\0') {
+            const char *filename = arg + 3;
+            int oom = 0;
+            char *resolved = resolve_l_colon(filename, l_dirs, n_l_dirs, &oom);
+            if (!resolved) {
+                if (oom) {
+                    fprintf(stderr, "ERROR: zig-%s: malloc failed\n", ZIG_CC_MODE);
+                } else if (n_l_dirs == 0) {
+                    fprintf(stderr,
+                            "ERROR: zig-%s: -l:%s not found: no -L directories were given "
+                            "on the command line, so the exact-filename token could not be "
+                            "resolved.\n",
+                            ZIG_CC_MODE, filename);
+                } else {
+                    fprintf(stderr,
+                            "ERROR: zig-%s: -l:%s not found. Searched %d -L directories:\n",
+                            ZIG_CC_MODE, filename, n_l_dirs);
+                    for (int di = 0; di < n_l_dirs; di++)
+                        fprintf(stderr, "  %s\n", l_dirs[di]);
+                }
+                free(filtered);
+                free(out_argv);
+                free(l_dirs);
+                return 1;
+            }
+            filtered[fi++] = resolved;
+            continue;
         }
 
         /* -Wl,* drops -- skip if LLD promoted (LLD handles these) */
@@ -321,13 +591,34 @@ int main(int argc, char *argv[]) {
         filtered[fi++] = arg;
     }
     free(out_argv);
+    free(l_dirs);
 
     /* Determine final mode (R4 -nostdlib++ downgrade already applied
      * inside zig_translate_flags()) */
     const char *mode = mode_is_cxx ? "c++" : "cc";
 
-    /* Build final argv: zig mode [-fuse-ld=lld] [-target TARGET] <filtered...> */
-    int max_args = fi + 8;
+    /* x86_64 mingw c++ builds against conda-forge's GCC libstdc++ via
+     * `zig cc -nostdlib++`; ZIG_CXX_RUNTIME=zig keeps zig's libc++. */
+    const char *cxx_pre[1];
+    const char *cxx_post[7];
+    int n_cxx_pre = 0, n_cxx_post = 0;
+    char target_buf[96];
+    const char *inj_target = injected_target(target_buf, sizeof target_buf);
+    if (cxx_gcc_wanted && !has_target && target_abi_is_gnu(inj_target)) {
+        int reset_x = 0;
+        for (int i = 0; i < fi; i++)
+            if (starts_with(filtered[i], "-x")) { reset_x = 1; break; }
+        if (mingw_libstdcxx_args(conda_prefix, invocation_links(filtered, fi), reset_x,
+                                 cxx_pre, &n_cxx_pre, cxx_post, &n_cxx_post) < 0) {
+            free(filtered);
+            return 1;
+        }
+        mode = "cc";
+    }
+
+    /* Build final argv: zig mode [-nostdlib++] [-fuse-ld=lld] [-target TARGET]
+     * <filtered...> [libstdc++ flags] */
+    int max_args = fi + 8 + n_cxx_pre + n_cxx_post;
     const char **new_argv = malloc(sizeof(char *) * max_args);
     if (!new_argv) {
         fprintf(stderr, "ERROR: zig-%s: malloc failed\n", ZIG_CC_MODE);
@@ -338,22 +629,37 @@ int main(int argc, char *argv[]) {
     int ni = 0;
     new_argv[ni++] = zig_path;
     new_argv[ni++] = mode;
+    for (int i = 0; i < n_cxx_pre; i++)
+        new_argv[ni++] = cxx_pre[i];
     if (use_lld)
         new_argv[ni++] = "-fuse-ld=lld";
     if (!has_target) {
         new_argv[ni++] = "-target";
-        new_argv[ni++] = ZIG_TARGET;
+        new_argv[ni++] = inj_target;
     }
 
     for (int i = 0; i < fi; i++)
         new_argv[ni++] = filtered[i];
+    for (int i = 0; i < n_cxx_post; i++)
+        new_argv[ni++] = cxx_post[i];
 
     new_argv[ni] = NULL;
 
     restore_msys2_system32_path();
 
+    /* Test-observability hook: print the final argv instead of spawning. */
+    const char *print_argv = getenv("ZIG_WRAPPER_PRINT_ARGV");
+    if (print_argv && *print_argv && strcmp(print_argv, "0") != 0) {
+        for (int i = 0; new_argv[i]; i++)
+            printf("%s\n", new_argv[i]);
+        fflush(stdout);
+        free(filtered);
+        free(new_argv);
+        return 0;
+    }
+
     /* Execute zig */
-    int ret = (int)_spawnv(_P_WAIT, zig_path, new_argv);
+    int ret = zig_spawn_wait(zig_path, (const char *const *)new_argv);
     free(filtered);
     free(new_argv);
 

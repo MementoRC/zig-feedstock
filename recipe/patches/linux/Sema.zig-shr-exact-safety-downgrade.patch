@@ -6,7 +6,7 @@
 
 --- a/src/Sema.zig
 +++ b/src/Sema.zig
-@@ -13389,7 +13389,15 @@
+@@ -13260,7 +13260,15 @@
          break :rs rhs_src;
      };
      try sema.requireRuntimeBlock(block, src, runtime_src);

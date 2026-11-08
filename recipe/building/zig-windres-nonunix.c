@@ -12,6 +12,7 @@
  */
 
 #include "nonunix_common.h"
+#include "nonunix_spawn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,13 +23,7 @@
 
 /* --- Find zig binary --- */
 static int find_zig(char *out, size_t out_size) {
-    const char *conda = getenv("CONDA_PREFIX");
-    if (conda && conda[0]) {
-        snprintf(out, out_size, "%s\\Library\\bin\\%s", conda, ZIG_BIN_NAME);
-        if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES)
-            return 1;
-    }
-    return 0;
+    return zig_find_in_prefixes(out, out_size, ZIG_BIN_NAME) != NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -38,14 +33,16 @@ int main(int argc, char *argv[]) {
     char zig_path[MAX_PATH];
     if (!find_zig(zig_path, MAX_PATH)) {
         fprintf(stderr, "ERROR: zig-windres: zig binary not found (%s)\n", ZIG_BIN_NAME);
+        fprintf(stderr, "  PREFIX=%s\n",
+                getenv("PREFIX") ? getenv("PREFIX") : "(unset)");
         fprintf(stderr, "  CONDA_PREFIX=%s\n",
                 getenv("CONDA_PREFIX") ? getenv("CONDA_PREFIX") : "(unset)");
         return 1;
     }
 
-    /* Allocate new argv: zig_path + "rc" + translated user args + NULL sentinel.
-     * Size (argc + 4) is safe: at most argc-1 user args, plus path, "rc", NULL. */
-    const char **new_argv = malloc(sizeof(char *) * (argc + 4));
+    /* Allocate new argv: zig_path + "rc" + translated user args + captured
+     * -i input (appended positionally) + NULL sentinel. */
+    const char **new_argv = malloc(sizeof(char *) * (argc + 5));
     if (!new_argv) {
         fprintf(stderr, "ERROR: zig-windres: malloc failed\n");
         return 1;
@@ -55,7 +52,11 @@ int main(int argc, char *argv[]) {
     new_argv[ni++] = zig_path;
     new_argv[ni++] = "rc";
 
-    /* Translate user args: -o <X> -> -fo <X>, -o<X> -> -fo<X>, rest unchanged. */
+    /* Translate user args: -o <X> -> -fo <X>, -o<X> -> -fo<X>.
+     * -i <file>/-i<file> is GNU windres's input file, but zig rc's -i means
+     * include-dir; capture it and re-emit as a positional arg after all
+     * options (resinator requires positional input). Rest unchanged. */
+    const char *captured_input = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
@@ -77,17 +78,30 @@ int main(int argc, char *argv[]) {
             strcpy(translated, "-fo");
             strcat(translated, arg + 2);
             new_argv[ni++] = translated;
+        } else if (strcmp(arg, "-i") == 0) {
+            /* Two-arg form: capture, or forward unchanged if nothing follows */
+            if (i + 1 < argc) {
+                captured_input = argv[++i];
+            } else {
+                new_argv[ni++] = arg;
+            }
+        } else if (strncmp(arg, "-i", 2) == 0 && arg[2] != '\0') {
+            /* Concatenated form: -i<file> (no space) */
+            captured_input = arg + 2;
         } else {
             new_argv[ni++] = arg;
         }
     }
+
+    if (captured_input)
+        new_argv[ni++] = captured_input;
 
     new_argv[ni] = NULL;
 
     restore_msys2_system32_path();
 
     /* Execute zig rc */
-    int ret = (int)_spawnv(_P_WAIT, zig_path, new_argv);
+    int ret = zig_spawn_wait(zig_path, (const char *const *)new_argv);
 
     if (ret == -1) {
         fprintf(stderr, "ERROR: zig-windres: failed to exec %s: %s\n",

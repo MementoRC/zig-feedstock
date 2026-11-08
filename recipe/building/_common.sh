@@ -2,7 +2,9 @@
 # Idempotency-guarded; safe to source multiple times.
 # Requires: ${target_platform} and ${build_platform} to be set by the caller before any function call.
 
-[[ -n "${_ZIG_COMMON_SH_SOURCED:-}" ]] && return 0
+if [[ -n "${_ZIG_COMMON_SH_SOURCED:-}" ]]; then
+  return 0
+fi
 _ZIG_COMMON_SH_SOURCED=1
 
 is_linux()    { [[ "${target_platform}" == "linux-"* ]]; }
@@ -10,8 +12,18 @@ is_osx()      { [[ "${target_platform}" == "osx-"* ]]; }
 is_unix()     { [[ "${target_platform}" == "linux-"* || "${target_platform}" == "osx-"* ]]; }
 is_not_unix() { ! is_unix; }
 is_cross()    { [[ "${build_platform}" != "${target_platform}" ]]; }
+is_rosetta()  { [[ "${build_platform}" == "osx-arm64" && "${target_platform}" == "osx-64" ]]; }
 
-dbg() { [[ "${DEBUG_ZIG_BUILD:-0}" == "1" ]] && "$@" || true; }
+# xtrace-quiet: conda-build/rattler-build runs the build script under `set -x`
+# from outside recipe/, so a DISABLED dbg call still emitted three trace lines
+# (the invocation, the gate test, and the `true`). Suppress xtrace across the
+# body and restore it, leaving only the caller-level invocation line.
+dbg() {
+  { local _x; case $- in *x*) _x=1;; *) _x=0;; esac; set +x; } 2>/dev/null
+  [[ "${DEBUG_ZIG_BUILD:-0}" == "1" ]] && "$@"
+  [[ ${_x} == 1 ]] && { set -x; } 2>/dev/null
+  return 0
+}
 
 # sanitize_cross_cflags TARGET_ARCH FLAGS...
 # Strips arch-incompatible -march/-mtune/-mcpu/-mfeat flags injected by
@@ -40,7 +52,9 @@ sanitize_cross_cflags() {
 
   for _flag in ${_flags}; do
     printf '%s\n' "${_flag}" | grep -qE "^(${_remove_pat})$" && continue
-    printf ' %s ' "${_seen}" | grep -qF " ${_flag} " && continue
+    if printf ' %s ' "${_seen}" | grep -qF " ${_flag} "; then
+      continue
+    fi
     _seen="${_seen} ${_flag}"
     _result="${_result:+${_result} }${_flag}"
   done
@@ -54,7 +68,72 @@ sanitize_and_export_cross_flags() {
   local _v
   for _v in CFLAGS CXXFLAGS; do
     [[ -z "${!_v:-}" ]] && continue
-    declare -g "${_v}=$(sanitize_cross_cflags "${_arch}" "${!_v}")"
+    printf -v "${_v}" '%s' "$(sanitize_cross_cflags "${_arch}" "${!_v}")"
     export "${_v}"
   done
+}
+
+_cfg_subst() {  # _cfg_subst FILE PATTERN REPL [g] -- warns (does not fail) if zero lines matched
+  local _pat="$2"
+  local _rc=0
+  python - "$@" <<'PY' || _rc=$?
+import re, sys
+path, pat, repl = sys.argv[1], sys.argv[2], sys.argv[3]
+count = 0 if len(sys.argv) > 4 else 1
+with open(path, 'r', newline='') as f:
+    data = f.read()
+total = 0
+out = []
+for ln in data.splitlines(keepends=True):
+    new_ln, n = re.subn(pat, repl, ln, count=count)
+    total += n
+    out.append(new_ln)
+with open(path, 'w', newline='') as f:
+    f.write(''.join(out))
+sys.exit(0 if total > 0 else 1)
+PY
+  if [[ ${_rc} -ne 0 ]]; then
+    if [[ "${CFG_SUBST_ZERO_OK:-}" == "1" ]]; then
+      echo "INFO: config.h substitution matched nothing (expected): ${_pat}"
+    else
+      echo "WARNING: config.h substitution matched nothing: ${_pat}" >&2
+    fi
+  fi
+  return 0
+}
+
+_cfg_subst_lit() {  # _cfg_subst_lit FILE LITERAL REPL -- literal, global, ZIG_LLVM_ lines only
+                     # warns (does not fail) if zero occurrences matched
+  local _lit="$2"
+  local _rc=0
+  python - "$@" <<'PY' || _rc=$?
+import sys
+path, lit, repl = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def spellings(p):
+    """MSYS POSIX (/c/x), CMake (C:/x) and native (C:\\x) forms of one path."""
+    forms = [p]
+    if len(p) > 2 and p[0] == '/' and p[2] == '/':
+        drive, rest = p[1].upper(), p[3:]
+        forms.append(drive + ':/' + rest)
+        forms.append(drive + ':\\' + rest.replace('/', '\\'))
+    return forms
+
+pairs = list(zip(spellings(lit), spellings(repl)))
+with open(path, 'r', newline='') as f:
+    data = f.read()
+out = []
+total = 0
+for ln in data.splitlines(keepends=True):
+    if 'ZIG_LLVM_' in ln:
+        for a, b in pairs:
+            total += ln.count(a)
+            ln = ln.replace(a, b)
+    out.append(ln)
+with open(path, 'w', newline='') as f:
+    f.write(''.join(out))
+sys.exit(0 if total > 0 else 1)
+PY
+  [[ ${_rc} -ne 0 ]] && echo "WARNING: config.h substitution matched nothing: ${_lit}" >&2
+  return 0
 }

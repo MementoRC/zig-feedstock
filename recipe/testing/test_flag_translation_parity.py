@@ -1,53 +1,35 @@
 #!/usr/bin/env python3
 """
-Golden/characterization parity tests for the zig-cc wrapper flag-translation
-fragment (recipe/scripts/_zig-cc-common.sh) vs the shared manifest
-(recipe/building/flag_rules.py) that now drives both the Unix bash fragment
-and the Windows compiled shim (recipe/building/zig-cc-nonunix.c).
+Parity + syntax-gate tests for the zig-cc/zig-cxx flag-translation logic
+driven by the shared manifest (recipe/building/flag_rules.py), which is
+generated into recipe/building/_translate.gen.sh (bash) and
+recipe/building/_translate.inc (C, included by zig-cc-unix.c), plus the
+Windows compiled shim (recipe/building/zig-cc-nonunix.c).
 
-The Phase 2/3 wrapper de-dup refactor has LANDED: the single flag-translation
-manifest is generated into _translate.gen.sh (bash) and _translate.inc (C),
-and both wrappers consume it. So this is now a REGRESSION suite, not test-
-first scaffolding: all 13 characterization cases are labelled
-kind="clean-lock" and record the unified ("winner") behavior as a fixed
-literal, so any drift in already-correct behavior shows up as a real FAIL.
-
-The kind="drift-tdd" label (print as WARN, not FAIL) remains available in the
-harness for any FUTURE test-first rule added ahead of its wrapper
-implementation, but no case currently uses it.
-
-Facts verified by reading recipe/scripts/_zig-cc-common.sh + zig-cc.sh
-before writing this table (do not re-derive from memory -- re-read the
-source if the wrapper changes):
-  - Caller contract: sourcing script sets _ZIG_MODE ("cc" or "c++") before
-    `source _zig-cc-common.sh`; the fragment sets `_exec_args` (line 281)
-    ready for `exec "@ZIG_BIN@" "${_exec_args[@]}"`.
-  - Template placeholders the fragment itself references: @ZIG_TARGET@ and
-    @ZIG_TARGET_ARCH@ (install_zig_activation.py substitutes these at
-    install time -- @ZIG_BIN@ / @WRAPPER_PREFIX@ only appear in zig-cc.sh's
-    source/exec lines, never inside the fragment, so they are irrelevant
-    to this fragment-only capture).
-  - Auto-LLD promotion (_use_lld) has exactly one observable effect on
-    _exec_args: appending the literal token "-fuse-ld=lld" (line
-    229-236) -- there is no other signal, so "-fuse-ld=lld" membership is
-    used below as the sole observable proxy for "LLD activated".
-  - -print-search-dirs / -print-file-name=* intercept and `exit 0` (lines
-    32-66) BEFORE _exec_args is ever built -- captured via stdout instead.
+recipe/scripts/_zig-cc-common.sh (the former hand-written bash fragment that
+this suite used to golden-test directly) has been DELETED: its logic is now
+compiled into zig-cc-unix.c via _translate.inc. This module therefore has
+two legs left, both fragment-independent:
+  - Leg (A)/(B): GEN_CASES -- token-predicate assertions run against the
+    GENERATED translators directly (_translate.inc via a small C harness,
+    and _translate.gen.sh sourced in bash), proving the manifest-driven
+    unix and win profiles agree.
+  - Leg (C): run_unix_shim_compile_leg -- `-c` compiles
+    zig-cc-unix.c (the live runtime path) to keep it warning-clean.
 
 Not pytest: matches the custom PASS/FAIL/WARN/SKIP harness used by
 test_zig_toolchain.py (see _test_utils.py) so this runs standalone with
 just bash + python -- no zig install, no $ZIG_CC required.
 
 Exit codes:
-  0 = no clean-lock FAILs (drift-tdd reds are expected and do not fail
-      the module; see the "Expected-red" summary line)
-  1 = at least one clean-lock FAIL (a real regression in already-locked
-      behavior) or any other FAIL
+  0 = no FAILs
+  1 = at least one FAIL
 """
 
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -58,30 +40,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from _test_utils import PASS, FAIL, WARN, SKIP, _results
+from _test_utils import PASS, FAIL, WARN, SKIP, _results, enforce_coverage_floor
 
-# Anchor: __file__ is <base>/testing/<thisfile>. At local-dev time <base> is
-# recipe/; at rattler-build test time the `files: recipe:` entries (recipe.yaml)
-# stage under the test-step dir with the SAME scripts/ building/ testing/ layout,
-# so <base> is the step dir. parents[1] is correct for BOTH layouts; do NOT
-# prepend a "recipe" segment (it only exists in the local checkout, and adding
-# it makes the path resolve one level too deep at rattler test time, which is
-# the FileNotFoundError seen across all CI columns in PR #115).
+# Anchor: __file__ is <base>/testing/<thisfile>; parents[1] walks up one level
+# to <base>, valid both locally (recipe/) and at rattler-build test time.
 _RECIPE_DIR = Path(__file__).resolve().parents[1]
-_COMMON_SH = _RECIPE_DIR / "scripts" / "_zig-cc-common.sh"
 
 _BASH = shutil.which("bash")
 
-# Verified name of the final translated-args array (recipe/scripts/_zig-cc-common.sh:281).
-_EXEC_ARGS_VAR = "_exec_args"
-
-# Placeholder stand-ins for the two @...@ template tokens the fragment reads
-# (recipe/install_zig_activation.py "replacements" dict). cc_target there is
-# the glibc-stripped triplet (e.g. "x86_64-linux-gnu"); target_arch is its
-# first "-"-separated segment.
-_DEFAULT_TARGET = "x86_64-linux-gnu"
-_DEFAULT_ARCH = "x86_64"
-_WINDOWS_TARGET = "x86_64-windows-gnu"  # needed to trigger the -Map rewrite branch
 
 # ---------------------------------------------------------------------------
 # GENERATED-leg constants (recipe/building/_translate.inc, _translate.gen.sh)
@@ -89,26 +55,12 @@ _WINDOWS_TARGET = "x86_64-windows-gnu"  # needed to trigger the -Map rewrite bra
 _BUILDING_DIR = _RECIPE_DIR / "building"
 _TRANSLATE_GEN_SH = _BUILDING_DIR / "_translate.gen.sh"
 _HARNESS_C = _RECIPE_DIR / "testing" / "_translate_harness.c"
+_UNIX_SHIM_C = _BUILDING_DIR / "zig-cc-unix.c"
 
 
 # ---------------------------------------------------------------------------
-# Bash-source-capture helper
+# Shared bash `declare -p` array parser (used by the generated-bash leg)
 # ---------------------------------------------------------------------------
-def _patch_common_sh(dest: Path, *, target: str, arch: str) -> None:
-    text = _COMMON_SH.read_text()
-    text = text.replace("@ZIG_TARGET_ARCH@", arch).replace("@ZIG_TARGET@", target)
-    # common.sh's `source "${_self_dir}/@WRAPPER_PREFIX@_translate.gen.sh"`
-    # must resolve inside this tmpdir -- substitute the prefix to "" so it
-    # matches the unprefixed copy staged below (BASH_SOURCE[0]-derived
-    # _self_dir already resolves to dest.parent when patched is sourced).
-    text = text.replace("@WRAPPER_PREFIX@", "")
-    dest.write_text(text)
-    # Stage the generated flag-translation fragment alongside the patched
-    # common.sh so its `source` line finds it. _translate.gen.sh has no
-    # @...@ placeholders of its own, so it is copied verbatim.
-    (dest.parent / "_translate.gen.sh").write_text(_TRANSLATE_GEN_SH.read_text())
-
-
 def _parse_declare_p_array(output: str, varname: str) -> list[str] | None:
     """Parse `declare -p <varname>` bash output for an indexed array.
 
@@ -130,338 +82,12 @@ def _parse_declare_p_array(output: str, varname: str) -> list[str] | None:
     return [re.sub(r'\\(.)', r'\1', item) for item in items]
 
 
-def _bash_capture(
-    mode: str,
-    argv: list[str],
-    *,
-    target: str = _DEFAULT_TARGET,
-    arch: str = _DEFAULT_ARCH,
-) -> tuple[list[str] | None, str, str]:
-    """Source _zig-cc-common.sh in a bash subshell; return (exec_args, stdout, conda_prefix).
-
-    exec_args is None for print-and-exit flags (-print-search-dirs,
-    -print-file-name=*) which intercept + `exit 0` before the array is ever
-    built -- stdout carries the observable output for those instead. Does
-    NOT run zig and does NOT execute zig-cc.sh's final exec line -- only
-    the common fragment is sourced.
-    """
-    if not _BASH:
-        return None, "", ""
-
-    with tempfile.TemporaryDirectory() as td:
-        tdp = Path(td)
-        patched = tdp / "_zig-cc-common.sh"
-        _patch_common_sh(patched, target=target, arch=arch)
-        conda_prefix = tdp / "conda_prefix"
-        conda_prefix.mkdir()
-
-        env = dict(os.environ)
-        env["CONDA_PREFIX"] = str(conda_prefix)
-        env["HOME"] = str(conda_prefix)
-        env.pop("CONDA_BUILD_SYSROOT", None)
-        env.pop("ZIG_GLOBAL_CACHE_DIR", None)
-        env.pop("XDG_DATA_HOME", None)
-
-        quoted_argv = " ".join(shlex.quote(a) for a in argv)
-        script = (
-            f"_ZIG_MODE={shlex.quote(mode)}\n"
-            f"set -- {quoted_argv}\n"
-            f"source {shlex.quote(str(patched))}\n"
-            f"declare -p {_EXEC_ARGS_VAR}\n"
-        )
-        try:
-            proc = subprocess.run(
-                [_BASH, "-c", script],
-                cwd=str(tdp),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except subprocess.TimeoutExpired:
-            return None, "TIMEOUT", str(conda_prefix)
-
-        exec_args = _parse_declare_p_array(proc.stdout, _EXEC_ARGS_VAR)
-        return exec_args, proc.stdout, str(conda_prefix)
-
-
-# ---------------------------------------------------------------------------
-# Golden table
-# ---------------------------------------------------------------------------
-Check = tuple[str, Callable[[list[str] | None, str], bool]]
-StdoutCheck = Callable[[str, str], tuple[bool, str]]
-
-
-def _eq(expected: list[str]) -> Callable[[list[str] | None, str], bool]:
-    return lambda exec_args, stdout: exec_args == expected
-
-
-def _eq_multiset(expected: list[str]) -> Callable[[list[str] | None, str], bool]:
-    """Order-insensitive equality: same tokens, same counts, any order.
-
-    Used for the actual-bash clean-lock cases (ids 1,2,4,5) post-Phase-3:
-    R6's -mcpu=baseline is now prepended by the generated translator inside
-    _tr_out_args rather than assembled at a fixed position by the wrapper,
-    which can benignly reorder argv relative to the pre-refactor literal
-    without dropping or adding any flag.
-    """
-    return lambda exec_args, stdout: exec_args is not None and sorted(exec_args) == sorted(expected)
-
-
-def _has(flag: str) -> Callable[[list[str] | None, str], bool]:
-    return lambda exec_args, stdout: exec_args is not None and flag in exec_args
-
-
-def _absent(flag: str) -> Callable[[list[str] | None, str], bool]:
-    return lambda exec_args, stdout: exec_args is not None and flag not in exec_args
-
-
-def _no_substring(needle: str) -> Callable[[list[str] | None, str], bool]:
-    return lambda exec_args, stdout: exec_args is not None and not any(
-        needle in a for a in exec_args
-    )
-
-
-def _adjacent(a: str, b: str) -> Callable[[list[str] | None, str], bool]:
-    def _check(exec_args: list[str] | None, stdout: str) -> bool:
-        if exec_args is None:
-            return False
-        return any(exec_args[i] == a and exec_args[i + 1] == b for i in range(len(exec_args) - 1))
-
-    return _check
-
-
-def _target_count_one() -> Callable[[list[str] | None, str], bool]:
-    return lambda exec_args, stdout: exec_args is not None and exec_args.count("-target") == 1
-
-
-@dataclass(frozen=True)
-class Case:
-    id: int
-    desc: str
-    kind: str  # "clean-lock" | "drift-tdd"
-    mode: str
-    argv: list[str]
-    checks: list[Check]
-    target: str = _DEFAULT_TARGET
-    arch: str = _DEFAULT_ARCH
-    stdout_check: StdoutCheck | None = None
-
-
-def _check_print_search_dirs(conda_prefix: str, stdout: str) -> tuple[bool, str]:
-    zig_lib = f"{conda_prefix}/lib/zig"
-    expected_lines = [
-        f"install: {zig_lib}/",
-        f"programs: ={conda_prefix}/bin/",
-        f"libraries: ={zig_lib}/libc/mingw/lib-common:{zig_lib}/libc/mingw/lib-x86_64:{zig_lib}",
-    ]
-    lines = stdout.splitlines()
-    if lines == expected_lines:
-        return True, ""
-    return False, f"expected={expected_lines!r} actual={lines!r}"
-
-
-CASES: list[Case] = [
-    # --- CLEAN rules: golden = TODAY's actual captured bash output ---------
-    Case(
-        id=1,
-        desc="bare -Map rewritten to -Wl,-Map,FILE (windows target)",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Map", "foo.map"],
-        target=_WINDOWS_TARGET,
-        checks=[
-            (
-                "exec_args == locked literal (sorted multiset)",
-                _eq_multiset(["cc", "-target", _WINDOWS_TARGET, "-mcpu=baseline", "-Wl,-Map,foo.map"]),
-            ),
-        ],
-    ),
-    Case(
-        id=2,
-        desc="-Map=foo.map rewritten to -Wl,-Map,FILE (windows target)",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Map=foo.map"],
-        target=_WINDOWS_TARGET,
-        checks=[
-            (
-                "exec_args == locked literal (sorted multiset)",
-                _eq_multiset(["cc", "-target", _WINDOWS_TARGET, "-mcpu=baseline", "-Wl,-Map,foo.map"]),
-            ),
-        ],
-    ),
-    Case(
-        id=3,
-        desc="-print-search-dirs emits install:/programs:/libraries: triplet",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-print-search-dirs"],
-        checks=[],
-        stdout_check=_check_print_search_dirs,
-    ),
-    Case(
-        id=4,
-        desc="-nostdlib++ downgrades cxx mode to cc and is stripped",
-        kind="clean-lock",
-        mode="c++",
-        argv=["-nostdlib++"],
-        checks=[
-            (
-                "exec_args == locked literal (sorted multiset)",
-                _eq_multiset(["cc", "-target", _DEFAULT_TARGET, "-mcpu=baseline"]),
-            ),
-        ],
-    ),
-    Case(
-        id=5,
-        desc="-target x86_64-conda-linux-gnu strips conda- infix",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-target", "x86_64-conda-linux-gnu"],
-        checks=[
-            (
-                "exec_args == locked literal (sorted multiset)",
-                _eq_multiset(["cc", "-mcpu=baseline", "-target", "x86_64-linux-gnu"]),
-            ),
-            ("no duplicate baked-in -target", _target_count_one()),
-        ],
-    ),
-    # --- Former DRIFT rules: now UNIFIED via the manifest and LOCKED to the winner behavior (clean-lock) ---
-    Case(
-        id=6,
-        desc="-mcpu=native kept verbatim, no -mcpu=baseline injected",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-mcpu=native"],
-        checks=[
-            ("-mcpu=native present", _has("-mcpu=native")),
-            ("-mcpu=baseline NOT injected", _absent("-mcpu=baseline")),
-        ],
-    ),
-    Case(
-        id=7,
-        desc="-Wl,--color-diagnostics always dropped regardless of use_lld",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,--color-diagnostics"],
-        checks=[
-            ("--color-diagnostics dropped", _absent("-Wl,--color-diagnostics")),
-        ],
-    ),
-    Case(
-        id=8,
-        desc="-Wl,-z,now kept (pass through, not dropped)",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,-z,now"],
-        checks=[
-            ("-Wl,-z,now kept", _has("-Wl,-z,now")),
-        ],
-    ),
-    Case(
-        id=9,
-        desc="-Wl,-z,defs kept AND activates use_lld",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,-z,defs"],
-        checks=[
-            ("-Wl,-z,defs kept", _has("-Wl,-z,defs")),
-            ("use_lld activated (-fuse-ld=lld present)", _has("-fuse-ld=lld")),
-        ],
-    ),
-    Case(
-        id=10,
-        desc="-Wl,-O2 kept AND activates use_lld",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,-O2"],
-        checks=[
-            ("-Wl,-O2 kept", _has("-Wl,-O2")),
-            ("use_lld activated (-fuse-ld=lld present)", _has("-fuse-ld=lld")),
-        ],
-    ),
-    Case(
-        id=11,
-        desc="-Xlinker -Bsymbolic-functions kept AND activates use_lld",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Xlinker", "-Bsymbolic-functions"],
-        checks=[
-            ("-Xlinker -Bsymbolic-functions kept adjacent", _adjacent("-Xlinker", "-Bsymbolic-functions")),
-            ("use_lld activated (-fuse-ld=lld present)", _has("-fuse-ld=lld")),
-        ],
-    ),
-    Case(
-        id=12,
-        desc="combo: -z,defs kept+lld active, --color-diagnostics still dropped",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,-z,defs", "-Wl,--color-diagnostics"],
-        checks=[
-            ("-Wl,-z,defs kept", _has("-Wl,-z,defs")),
-            ("use_lld activated (-fuse-ld=lld present)", _has("-fuse-ld=lld")),
-            ("--color-diagnostics still dropped", _absent("-Wl,--color-diagnostics")),
-        ],
-    ),
-    Case(
-        id=13,
-        desc="combo: -O2 kept+lld active, -rpath-link still dropped despite lld",
-        kind="clean-lock",
-        mode="cc",
-        argv=["-Wl,-rpath-link,/x", "-Wl,-O2"],
-        checks=[
-            ("-Wl,-O2 kept", _has("-Wl,-O2")),
-            ("use_lld activated (-fuse-ld=lld present)", _has("-fuse-ld=lld")),
-            ("-rpath-link still dropped", _no_substring("-rpath-link")),
-        ],
-    ),
-]
-
-
-def _run_case(case: Case, expected_red: list[str]) -> None:
-    name = f"[{case.id:02d}] {case.desc}"
-    if not _BASH:
-        SKIP(name, "bash unavailable")
-        return
-
-    exec_args, stdout, conda_prefix = _bash_capture(
-        case.mode, case.argv, target=case.target, arch=case.arch
-    )
-
-    if case.stdout_check is not None:
-        ok, detail = case.stdout_check(conda_prefix, stdout)
-        PASS(name) if ok else FAIL(name, detail)
-        return
-
-    if exec_args is None:
-        FAIL(name, f"no _exec_args captured (unexpected exit); stdout={stdout[:300]!r}")
-        return
-
-    failures = [label for label, pred in case.checks if not pred(exec_args, stdout)]
-    if not failures:
-        if case.kind == "drift-tdd":
-            PASS(name, "winner behavior already implemented (no longer red)")
-        else:
-            PASS(name)
-        return
-
-    detail = f"failed sub-checks: {failures}; exec_args={exec_args!r}"
-    if case.kind == "clean-lock":
-        FAIL(name, detail)
-    else:
-        WARN(name, f"RED until Phase 2/3 unifies via manifest -- {detail}")
-        expected_red.append(name)
-
-
 # ===================================================================
 # GENERATED-leg golden table
 #
 # These two legs assert that the GENERATED translators
 # (recipe/building/_translate.inc / _translate.gen.sh) implement the
-# WINNER behavior directly. The Phase 2/3 manifest unification has LANDED,
-# so the actual-bash leg above now matches these legs on every case (all 13
-# are clean-lock); all three legs are expected to be entirely GREEN.
+# WINNER behavior directly, independent of any hand-written bash fragment.
 #
 # Assertions are RULE-RELEVANT TOKEN predicates, not full-array equality:
 # the generated function's *out_argv is a PARTIAL argv that excludes
@@ -527,6 +153,24 @@ def _gen_intercept_assert(unix_res: GenResult, win_res: GenResult) -> tuple[bool
         f"unix.rc={unix_res.returncode} unix.stdout={unix_res.stdout[:200]!r} | "
         f"win.rc={win_res.returncode} win.stdout={win_res.stdout[:200]!r}"
     )
+
+
+def _gen_sysroot_assert(unix_res: GenResult, win_res: GenResult) -> tuple[bool, str]:
+    # R12 is unix-only. Asserted on the unix result ONLY, deliberately:
+    # the generated-BASH dispatch is built from rules_for_profile("unix")
+    # unconditionally (the bash wrapper never runs the win profile), so its
+    # win leg also intercepts -- while generated-C's win profile passes
+    # -print-sysroot through. That divergence is by design and the assertion
+    # cannot tell the two legs apart, so win_res is not constrained here.
+    # Mirror-image of _gen_map_assert, which asserts on win_res only.
+    def _intercepted_empty(r: GenResult) -> bool:
+        if r.returncode == 2:            # C harness convention
+            return r.stdout.strip() == ""
+        # bash convention: `exit 0` after echoing "${_sr:-}" (empty here)
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    ok = _intercepted_empty(unix_res)
+    return ok, f"unix.rc={unix_res.returncode} unix.stdout={unix_res.stdout[:200]!r}"
 
 
 def _gen_mode_downgrade_assert(unix_res: GenResult, win_res: GenResult) -> tuple[bool, str]:
@@ -625,26 +269,136 @@ GEN_CASES: list[GenCase] = [
             and not any(t.startswith("-Wl,-rpath-link") for t in r.tokens)
         ),
     ),
+    GenCase(
+        14, "-print-sysroot intercepted on unix profile, prints empty _sr",
+        "cc", ["-print-sysroot"], _gen_sysroot_assert,
+    ),
 ]
 
 
 # ---------------------------------------------------------------------------
 # Leg (A): generated-C (_translate.inc via the compiled _translate_harness.c)
 # ---------------------------------------------------------------------------
+def _zig_cache_env(base: Path) -> dict[str, str]:
+    """Env with a temp local zig cache; the global cache stays shared so a warm mingw CRT is reused."""
+    env = dict(os.environ)
+    env["ZIG_LOCAL_CACHE_DIR"] = str(base / "zig-local-cache")
+    return env
+
+
+_HOST_PREFIXES = {
+    "amd64": ("x86_64-",),
+    "x86_64": ("x86_64-",),
+    "arm64": ("aarch64-", "arm64-"),
+    "aarch64": ("aarch64-", "arm64-"),
+    "ppc64le": ("powerpc64le-", "ppc64le-"),
+    "s390x": ("s390x-",),
+    "riscv64": ("riscv64-",),
+}
+
+
+def _find_cc() -> list[str] | None:
+    """Host C compiler argv: shipped host-arch <triplet>-zig cc, bare zig cc, then cc/gcc/clang.
+    Shipped zig first: runner clang on Windows has no libc headers; zig cc bundles them.
+    Only host-arch <triplet>-zig qualifies: other *-zig are cross targets.
+    Deliberately not the <triplet>-zig-cc wrappers, which target a cross arch."""
+    machine = platform.machine().lower()
+    host_prefixes = _HOST_PREFIXES.get(machine, (machine + "-",))
+    for var in ("CONDA_PREFIX", "PREFIX"):
+        prefix = os.environ.get(var)
+        if not prefix:
+            continue
+        for sub in ("bin", "Library/bin"):
+            d = Path(prefix) / sub
+            if not d.is_dir():
+                continue
+            shipped = sorted(
+                p for p in d.iterdir()
+                if p.is_file()
+                and (p.name.endswith("-zig") or p.name.endswith("-zig.exe"))
+                and p.name.startswith(host_prefixes)
+            )
+            if shipped:
+                return [str(shipped[0]), "cc"]
+    zig = shutil.which("zig")
+    if not zig:
+        for var in ("CONDA_PREFIX", "PREFIX"):
+            prefix = os.environ.get(var)
+            if prefix:
+                zig = shutil.which("zig", path=str(Path(prefix) / "bin"))
+                if zig:
+                    break
+    if zig:
+        return [zig, "cc"]
+    for exe in ("cc", "gcc", "clang"):
+        found = shutil.which(exe)
+        if found:
+            return [found]
+    return None
+
+
+def _cross_arch_zig() -> str | None:
+    """Name of a shipped non-host-arch <triplet>-zig (emulated lane), else None."""
+    machine = platform.machine().lower()
+    host_prefixes = _HOST_PREFIXES.get(machine, (machine + "-",))
+    for var in ("CONDA_PREFIX", "PREFIX"):
+        prefix = os.environ.get(var)
+        if not prefix:
+            continue
+        for sub in ("bin", "Library/bin"):
+            d = Path(prefix) / sub
+            if not d.is_dir():
+                continue
+            for p in sorted(d.iterdir()):
+                if (
+                    p.is_file()
+                    and (p.name.endswith("-zig") or p.name.endswith("-zig.exe"))
+                    and not p.name.startswith(host_prefixes)
+                ):
+                    return p.name
+    return None
+
+
+def _skip_cross_arch(name: str, zig_name: str) -> None:
+    SKIP(name, f"only a cross-arch zig ({zig_name}) for host {platform.machine()}; covered on host-arch lanes")
+
+
+def _coverage_floor() -> int:
+    # Cross-arch-only lanes skip genC + unix-shim (one SKIP each, replacing a FAIL): 16.
+    return 16 if _find_cc() is None and _cross_arch_zig() else 29
+
+
+# A cold zig cache builds the mingw CRT/libc on first compile (>120s on win CI).
+_HARNESS_COMPILE_TIMEOUT_S = 900
+
+
 def _compile_c_harness() -> Path | None:
     """Compile _translate_harness.c against the GENERATED _translate.inc.
-    Returns the binary path, or None if no C compiler is on PATH (the leg
-    SKIPs gracefully in that case)."""
-    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    Returns the binary path, or None if no C compiler is found (the leg
+    FAILs in that case). A compile failure is a FAIL, not a SKIP."""
+    cc = _find_cc()
     if not cc:
         return None
     tmpdir = Path(tempfile.mkdtemp(prefix="zig_translate_harness_"))
-    binpath = tmpdir / "_translate_harness"
-    proc = subprocess.run(
-        [cc, "-I", str(_BUILDING_DIR), str(_HARNESS_C), "-o", str(binpath)],
-        capture_output=True, text=True, timeout=60,
-    )
+    suffix = ".exe" if sys.platform == "win32" else ""
+    binpath = tmpdir / f"_translate_harness{suffix}"
+    try:
+        proc = subprocess.run(
+            [*cc, "-I", str(_BUILDING_DIR), str(_HARNESS_C), "-o", str(binpath)],
+            capture_output=True, text=True, timeout=_HARNESS_COMPILE_TIMEOUT_S,
+            env=_zig_cache_env(tmpdir),
+        )
+    except subprocess.TimeoutExpired:
+        FAIL(
+            "[genC] harness compile",
+            f"timed out after {_HARNESS_COMPILE_TIMEOUT_S}s (cc={cc})",
+        )
+        return None
     if proc.returncode != 0 or not binpath.exists():
+        FAIL(
+            "[genC] harness compile",
+            f"cc={cc} rc={proc.returncode}:\n{proc.stderr.strip()}",
+        )
         return None
     return binpath
 
@@ -683,9 +437,15 @@ def run_generated_c_leg() -> None:
     """Leg (A): assert the GENERATED C translator (_translate.inc) matches
     the golden table's token-based predicates."""
     print("--- Generated-C leg (_translate.inc via _translate_harness.c) ---")
+    if _find_cc() is None:
+        cross = _cross_arch_zig()
+        if cross:
+            _skip_cross_arch("generated-C leg (genC)", cross)
+        else:
+            FAIL("generated-C leg (genC)", "no C compiler found (cc/gcc/clang/zig)")
+        return
     harness = _compile_c_harness()
-    if harness is None:
-        SKIP("generated-C leg (genC)", "no C compiler found on PATH")
+    if harness is None:  # compile failure already reported as FAIL
         return
 
     conda_prefix = tempfile.mkdtemp(prefix="zig_translate_conda_")
@@ -757,30 +517,95 @@ def run_generated_bash_leg() -> None:
         PASS(name) if ok else FAIL(name, detail)
 
 
+# ---------------------------------------------------------------------------
+# Leg (C): the unix shim must COMPILE (zig-cc-unix.c + unix_common.h)
+# ---------------------------------------------------------------------------
+def run_unix_shim_compile_leg() -> None:
+    """Leg (C): syntax-check the unix C shim sources.
+
+    zig-cc-unix.c IS now compiled by install_zig_activation.py (the unix
+    multiplexer), but only on unix build hosts; this leg is the strict
+    syntax gate that keeps it warning-clean everywhere else.
+    Compile-only (-c to a temp .o): nothing is linked.
+
+    -std=c11 is deliberately STRICTER than production, which passes no -std=
+    at all (_compile_c_shim in install_zig_activation.py).  Strict mode forces
+    the POSIX feature-test-macro question, which is exactly how the setenv()
+    implicit-declaration bug was caught; keeping it strict here keeps that
+    class of bug visible instead of depending on a gnu-dialect default.
+
+    Any diagnostic at all is a FAIL: the sources are currently warning-clean,
+    and -Wimplicit-function-declaration is a hard error on clang >= 16 (which
+    zig cc is built on), so warnings here are not cosmetic.
+    """
+    print("--- Unix shim compile leg (zig-cc-unix.c + unix_common.h) ---")
+    name = "[unix-shim] zig-cc-unix.c syntax-clean (-std=c11 -Wall -Wextra)"
+
+    if not _UNIX_SHIM_C.exists():
+        SKIP(name, f"{_UNIX_SHIM_C.name} not staged in this environment")
+        return
+
+    # POSIX-only sources (unix_common.h pulls errno.h/unistd.h), and this recipe
+    # installs only triplet-prefixed compilers -- so on a Windows host the bare
+    # which() below can only find an unrelated runner-image binary whose headers
+    # will not resolve. Nothing to syntax-check here.
+    if sys.platform == "win32":
+        SKIP(name, "unix shim sources are POSIX-only (Windows host)")
+        return
+
+    cc = _find_cc()
+    if not cc:
+        cross = _cross_arch_zig()
+        if cross:
+            _skip_cross_arch(name, cross)
+        else:
+            FAIL(name, "no C compiler found (cc/gcc/clang/zig)")
+        return
+
+    # Real compile (-c -o) into a temp dir: zig cc ignores -c with -fsyntax-only.
+    with tempfile.TemporaryDirectory(prefix="zig_shim_compile_") as td:
+        try:
+            proc = subprocess.run(
+                [*cc, "-std=c11", "-Wall", "-Wextra", "-c", str(_UNIX_SHIM_C),
+                 "-o", str(Path(td) / "zig-cc-unix.o")],
+                capture_output=True,
+                text=True,
+                timeout=_HARNESS_COMPILE_TIMEOUT_S,
+                env=_zig_cache_env(Path(td)),
+            )
+        except subprocess.TimeoutExpired:
+            FAIL(name, f"compile timed out after {_HARNESS_COMPILE_TIMEOUT_S}s (cc={cc})")
+            return
+    diagnostics = proc.stderr.strip()
+    if proc.returncode != 0:
+        FAIL(name, f"compile FAILED (cc={cc}, rc={proc.returncode}):\n{diagnostics}")
+    elif diagnostics:
+        FAIL(name, f"compiled but emitted diagnostics (cc={cc}):\n{diagnostics}")
+    else:
+        PASS(name)
+
+
 # ===================================================================
 # Main
 # ===================================================================
 def main() -> int:
-    print("=== Flag Translation Parity (golden/characterization) ===")
+    print("=== Flag Translation Parity (generated-translator + shim-compile legs) ===")
     print(f"  bash            = {_BASH!r}")
-    print(f"  common.sh       = {_COMMON_SH}")
     print()
 
     if not _BASH:
-        print("  [skip-all] bash not found on PATH -- all bash-dependent cases will SKIP")
-    print("--- Golden table (bash-source-capture of _zig-cc-common.sh) ---")
+        print("  [skip-all] bash not found on PATH -- generated-bash leg cases will SKIP")
 
-    expected_red: list[str] = []
-    for case in CASES:
-        _run_case(case, expected_red)
-
-    print()
     run_generated_c_leg()
 
     print()
     run_generated_bash_leg()
 
     print()
+    run_unix_shim_compile_leg()
+
+    print()
+    enforce_coverage_floor(_coverage_floor(), "flag-parity", "PR #189 / 15f8265f")
     n_pass = len(_results["PASS"])
     n_fail = len(_results["FAIL"])
     n_warn = len(_results["WARN"])
@@ -789,12 +614,6 @@ def main() -> int:
         f"=== Results: {n_pass} passed, {n_fail} failed, "
         f"{n_warn} warnings, {n_skip} skipped ==="
     )
-    print(
-        f"=== Expected-red (drift-tdd, pending Phase 2/3 manifest unification): "
-        f"{len(expected_red)} ==="
-    )
-    for name in expected_red:
-        print(f"  - {name}")
 
     def _leg_counts(tag: str) -> tuple[int, int, int, int]:
         return tuple(
@@ -803,14 +622,13 @@ def main() -> int:
 
     genc_counts = _leg_counts("genC")
     genb_counts = _leg_counts("genB")
-    total_counts = (n_pass, n_fail, n_warn, n_skip)
-    actual_bash_counts = tuple(t - c - b for t, c, b in zip(total_counts, genc_counts, genb_counts))
+    shim_counts = _leg_counts("unix-shim")
 
     print()
     print("=== Per-leg breakdown (pass/fail/warn/skip) ===")
-    print(f"  actual-bash    : {actual_bash_counts}")
     print(f"  generated-C    : {genc_counts}")
     print(f"  generated-bash : {genb_counts}")
+    print(f"  unix-shim      : {shim_counts}")
 
     if n_fail:
         print("\nFailed tests (clean-lock regressions or capture errors):")
