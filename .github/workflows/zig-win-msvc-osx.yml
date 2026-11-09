@@ -1,0 +1,203 @@
+name: zig win-64 msvc from osx
+on:
+  push:
+    branches: [scratch/zig-win-msvc-osx]
+  workflow_dispatch:
+env:
+  ZV: 0.18.0-dev.935+ead8f5a7a
+  ZB: "9301"
+jobs:
+  osx-build:
+    name: build LLVM zig.exe for windows-msvc on osx-arm64
+    timeout-minutes: 240
+    runs-on: macos-15
+    env:
+      CONDA_BUILD_WINSDK: /Users/runner/winsdk
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: feedstock
+      - run: mkdir -p "$CONDA_BUILD_WINSDK"
+        shell: bash
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: zenv
+          init-shell: bash
+          create-args: >-
+            -c conda-forge/label/zig_dev -c conda-forge
+            zig=0.18.0=*_${{ env.ZB }}
+            zig_impl_osx-arm64=0.18.0=*_${{ env.ZB }}
+            msvc-headers-libs
+            winsdk
+            llvm-tools=23
+      - name: unpack zig_win-64 msvc into the env
+        # libmamba misparses its 'ver build[build_number=...]' zig_impl pin, even with --no-deps.
+        run: |
+          micromamba activate zenv
+          F=zig_win-64-0.18.0-msvc_c4fd70e_930_1d9e7ec5a_9301.conda
+          curl -fsSL -o "$RUNNER_TEMP/$F" "https://conda.anaconda.org/conda-forge/label/zig_dev/osx-arm64/$F"
+          micromamba package extract "$RUNNER_TEMP/$F" "$RUNNER_TEMP/zwin"
+          grep -c prefix_placeholder "$RUNNER_TEMP/zwin/info/paths.json" || true
+          grep -E '"(depends|build)"' -A4 "$RUNNER_TEMP/zwin/info/index.json"
+          for d in "$RUNNER_TEMP"/zwin/*; do
+            [ "$(basename "$d")" = info ] || cp -R "$d" "$CONDA_PREFIX/"
+          done
+          ls "$CONDA_PREFIX/etc/conda/activate.d"
+      - name: msvc activation state
+        run: |
+          set +e
+          micromamba activate zenv
+          micromamba list | grep -i -E 'zig|msvc|winsdk|vc14|ucrt'
+          env | grep -i -E 'winsdk|zig_msvc|^zig_' | sort
+          find "$CONDA_BUILD_WINSDK" -maxdepth 2 -type d | sort
+          ls "$CONDA_PREFIX/etc/conda/activate.d"
+          cat "$ZIG_MSVC_LIBC_FILE"
+          test -f "$ZIG_MSVC_LIBC_FILE"
+      - name: create win-64 LLVM prefix without running it
+        run: |
+          set +e
+          rc=0
+          micromamba create -y -p "$RUNNER_TEMP/winpfx" --platform win-64 -c conda-forge \
+            "llvmdev=23.1" "clangdev=23.1" "libclang-cpp=23.1" "lld=23.1" zstd zlib libxml2 libxml2-devel || rc=$?
+          echo "create rc=$rc"
+          grep -E 'LLVM_VERSION|LLVM_DEFAULT_TARGET' "$RUNNER_TEMP/winpfx/Library/include/llvm/Config/llvm-config.h"
+          exit $rc
+      - name: fetch zig source and apply recipe patches
+        run: |
+          curl -fsSL -o src.tar.xz "https://ziglang.org/builds/zig-$ZV.tar.xz"
+          mkdir src
+          tar -xf src.tar.xz -C src --strip-components=1
+          P="$GITHUB_WORKSPACE/feedstock/recipe/patches"
+          cd src
+          for p in \
+            Lld.zig-macho-lld-support.patch \
+            Lld.zig-glibc-libs-honour-no-as-needed.patch \
+            llvm.zig-lld-ofmt-macho.patch \
+            Config.zig-macho-no-auto-lld.patch \
+            main.zig-fuse-ld-lld-cc-path.patch \
+            build.zig-02-doctest-forward-target.patch \
+            build.zig-03-compiler-step-zig-lib-dir.patch \
+            libcxx.zig-darwin-typeinfo-comparison.patch \
+            non_unix/mingw.zig-01-include-setjmp-s.patch \
+            non_unix/mingw-setjmp-no-crtimp.patch \
+            non_unix/mingw.zig-02-arm64-stubs.patch \
+            posix.zig-dl-iterate-phdr-no-pt-phdr.patch \
+            x86.zig-hyphenate-llvm-names.patch \
+            Lld.zig-mingw-export-all-symbols.patch \
+            non_unix/build.zig-01-maxrss.patch \
+            non_unix/build.zig-02-llvm-lib-multipath.patch \
+            non_unix/build.zig-03-msvc-crt-dynamic.patch \
+            non_unix/CMakeLists.txt-01-correct-LLVM_LIBRARIES.patch \
+            non_unix/Lld.zig-remove-ucrt.patch \
+            non_unix/Lld.zig-suppress-importeddllmain.patch \
+            non_unix/CMakeLists.txt-02-MD-libzigcpp.patch \
+            non_unix/floatop.zig-log2-vectors-approx.patch \
+            non_unix/mingw-crtexe-no-atexit.patch \
+            non_unix/DepTokenizer.zig-rhs-leading-backslash-prereq.patch \
+            non_unix/ucrtbase-export-atexit-alias.patch \
+            non_unix/selfinfo-windows-arm64-ptrcast-aligncast.patch \
+            non_unix/gccmain-do-global-ctors-guard.patch \
+            non_unix/Compilation.zig-msvc-no-libcxxabi.patch
+          do
+            echo "== $p"
+            patch -p1 --forward --no-backup-if-mismatch -i "$P/$p"
+          done
+          # macos-15 arm64 runners have 7 GB; the build runner refuses a larger max_rss.
+          sed -i.bak -E 's/[0-9]_[0-9]{3}_000_000/6_000_000_000/g' build.zig
+          grep -n 'max_rss' build.zig | head
+          grep -q 'fms-runtime-lib=dll' build.zig || sed -i.bak 's/"-std=c++17",/"-std=c++17", "-fms-runtime-lib=dll",/' build.zig
+          sed -i.bak 's/^\(.*\)linkSystemLibrary("zstd"\(.*\)$/&\n\1linkSystemLibrary("libxml2"\2/' build.zig
+          # zig build --libc also reaches the host configurer; scope it to the zig exe only.
+          sed -i.bak 's|^\( *\)exe\.stack_size = stack_size;$|&\n\1if (exe.rootModuleTarget().os.tag == .windows) exe.setLibCFile(.{ .cwd_relative = "LIBC_MSVC_TXT" });|' build.zig
+          sed -i.bak "s|LIBC_MSVC_TXT|$RUNNER_TEMP/libc-msvc.txt|" build.zig
+          echo "setLibCFile: $(grep -c 'setLibCFile' build.zig)"
+          grep -n -B1 'setLibCFile' build.zig
+          echo "dynamic-crt: $(grep -c 'linkage = .dynamic' build.zig) ms-runtime-lib: $(grep -c 'fms-runtime-lib=dll' build.zig) libxml2: $(grep -c 'linkSystemLibrary("libxml2"' build.zig)"
+      - name: libc file for the build
+        run: |
+          micromamba activate zenv
+          cp "$ZIG_MSVC_LIBC_FILE" "$RUNNER_TEMP/libc-msvc.txt"
+          cat "$RUNNER_TEMP/libc-msvc.txt"
+      - name: build LLVM zig.exe for x86_64-windows-msvc
+        run: |
+          set +e
+          micromamba activate zenv
+          which zig
+          zig version
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zgc" ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zlc"
+          cd src
+          rc=0
+          time zig build -Dtarget=x86_64-windows-msvc -Dcpu=baseline -Doptimize=ReleaseSafe \
+            -Denable-llvm -Dstatic-llvm -Dno-langref \
+            --search-prefix "$RUNNER_TEMP/winpfx/Library" \
+            -Dversion-string="$ZV" --prefix "$RUNNER_TEMP/zig-out" > "$RUNNER_TEMP/msvc-build.log" 2>&1 || rc=$?
+          echo "build rc=$rc"
+          echo "BUILD_RC=$rc" >> "$GITHUB_ENV"
+          tail -n 150 "$RUNNER_TEMP/msvc-build.log"
+          grep -n -i -E 'error|undefined|unresolved|lld-link' "$RUNNER_TEMP/msvc-build.log" | head -80
+          exit 0
+      - name: inspect zig.exe, ship runtime DLLs
+        run: |
+          set +e
+          micromamba activate zenv
+          if [ -f "$RUNNER_TEMP/zig-out/bin/zig.exe" ]; then
+            for d in "$RUNNER_TEMP"/winpfx/Library/bin/*.dll; do case "$(basename "$d" | tr 'A-Z' 'a-z')" in *xml*|*zstd*|*zlib*|*iconv*|*charset*|*lzma*|icu*) cp -v "$d" "$RUNNER_TEMP/zig-out/bin/";; esac; done
+            llvm-readobj --coff-imports "$RUNNER_TEMP/zig-out/bin/zig.exe" | grep -i 'Name:' | sort -u
+            ls -la "$RUNNER_TEMP/zig-out/bin"
+            du -sh "$RUNNER_TEMP/zig-out/lib/zig"
+          else
+            echo "no zig.exe produced"
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-win-msvc-osx
+          path: ${{ runner.temp }}/zig-out
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msvc-build-log
+          path: ${{ runner.temp }}/msvc-build.log
+          if-no-files-found: ignore
+      - name: exit with build rc
+        run: exit "${BUILD_RC:-1}"
+        shell: bash
+  wintest:
+    name: run osx-built zig.exe on windows
+    needs: osx-build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zig-win-msvc-osx
+          path: win
+      - name: version, env, zig + C + C++ hellos
+        run: |
+          ZE="$PWD/win/bin/zig.exe"
+          "$ZE" version
+          "$ZE" env
+          printf 'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from osx-built zig.exe\\n", .{});\n}\n' > hello.zig
+          printf '#include <stdio.h>\nint main(void) { puts("hello from C"); return 0; }\n' > hello.c
+          printf '#include <iostream>\n#include <string>\nint main() { std::string s = "hello from C++"; std::cout << s << std::endl; return 0; }\n' > hello.cpp
+          fail=0
+          t() { local n="$1"; shift; echo "== $n"; if "$@"; then echo "PASS $n"; else echo "FAIL $n rc=$?"; fail=1; fi; }
+          t zig-win      "$ZE" build-exe -target x86_64-windows -femit-bin=hello_win.exe hello.zig
+          t zig-win-run  ./hello_win.exe
+          t zig-linux    "$ZE" build-exe -target x86_64-linux -femit-bin=hello_lnx hello.zig
+          t cc-gnu       "$ZE" cc -target x86_64-windows-gnu -mconsole -o c_gnu.exe hello.c
+          t cc-gnu-run   ./c_gnu.exe
+          t cc-msvc      "$ZE" cc -target x86_64-windows-msvc -o c_msvc.exe hello.c
+          t cc-msvc-run  ./c_msvc.exe
+          t cxx-gnu      "$ZE" c++ -target x86_64-windows-gnu -o cxx_gnu.exe hello.cpp
+          t cxx-gnu-run  ./cxx_gnu.exe
+          t cxx-msvc     "$ZE" c++ -target x86_64-windows-msvc -o cxx_msvc.exe hello.cpp
+          t cxx-msvc-run ./cxx_msvc.exe
+          t zig-test     "$ZE" test hello.zig
+          exit $fail
